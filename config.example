@@ -1,0 +1,24 @@
+# Slack app token for socket-mode event handling
+# (if not specified in RHCOSBOT_SLACK_APP_TOKEN env var)
+slack-app-token: xapp-1-xxx
+# Slack workspace token
+# (if not specified in RHCOSBOT_SLACK_TOKEN env var)
+slack-token: xoxb-xxx
+# Channel to monitor for messages
+channel: Cxxx
+# User ID that will receive error tracebacks via DM
+error-notification: Uxxx
+
+# Hostname of the Bugzilla server
+bugzilla: bugzilla.redhat.com
+# Prefix of user-friendly bug URL
+bugzilla-bug-url: https://bugzilla.redhat.com/show_bug.cgi?id=
+# Bugzilla API key
+# (if not specified in RHCOSBOT_BUGZILLA_KEY env var)
+bugzilla-key: xxx
+# Product containing the bugzilla-component
+bugzilla-product: OpenShift Container Platform
+# Component to file bootimage bump bugs against
+bugzilla-component: RHCOS
+# Default assignee for bootimage bugs
+bugzilla-assignee: bovik@example.com
