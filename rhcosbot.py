@@ -56,9 +56,13 @@ class Database:
         self._db.__enter__()
         return self
 
-    def __exit__(self, *args, **kwargs):
+    def __exit__(self, exc_type, exc_value, tb):
         '''Commit a database transaction.'''
-        return self._db.__exit__(*args, **kwargs)
+        if exc_type is HandledError:
+            # propagate exception but commit anyway
+            self._db.__exit__(None, None, None)
+            return False
+        return self._db.__exit__(exc_type, exc_value, tb)
 
     def add_event(self, channel, ts):
         '''Return False if the event is already present.'''
@@ -74,6 +78,11 @@ class Database:
                 (int(time.time() - max_age),))
 
 
+class HandledError(Exception):
+    '''An exception which should just be swallowed.'''
+    pass
+
+
 def report_errors(f):
     '''Decorator that sends exceptions to an administrator via Slack DM
     and then swallows them.  The first argument of the function must be
@@ -83,6 +92,8 @@ def report_errors(f):
     def wrapper(config, *args, **kwargs):
         try:
             return f(config, *args, **kwargs)
+        except HandledError:
+            pass
         except (json.JSONDecodeError, requests.ConnectionError, requests.HTTPError, requests.ReadTimeout) as e:
             # Exception type leaked from the bugzilla API.  Assume transient
             # network problem; don't send message.
@@ -172,6 +183,10 @@ class CommandHandler(metaclass=Registry):
                 # start a new thread or continue the existing one
                 thread_ts=self._event.get('thread_ts', self._event.ts))
 
+    def _fail(self, message):
+        self._reply(message)
+        raise HandledError()
+
     @register('ping')
     def _ping(self, *_args):
         # Check Bugzilla connectivity
@@ -180,8 +195,7 @@ class CommandHandler(metaclass=Registry):
                 raise Exception('Not logged in.')
         except Exception:
             # Swallow exception details and just report the failure
-            self._reply('Cannot contact Bugzilla.')
-            return
+            self._fail('Cannot contact Bugzilla.')
         self._complete()
 
     @register('help')
