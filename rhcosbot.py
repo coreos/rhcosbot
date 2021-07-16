@@ -14,6 +14,7 @@ from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 import sqlite3
 import time
+import threading
 import traceback
 import yaml
 
@@ -101,25 +102,103 @@ def report_errors(f):
     return wrapper
 
 
+class Registry(type):
+    '''Metaclass that creates a dict of functions registered with the
+    register decorator.'''
+
+    def __new__(cls, name, bases, attrs):
+        cls = super().__new__(cls, name, bases, attrs)
+        registry = {}
+        for f in attrs.values():
+            command = getattr(f, '_command', None)
+            if command is not None:
+                registry[command] = f
+        cls._registry = registry
+        return cls
+
+
+def register(*args):
+    '''Decorator that registers the subcommand handled by a function.'''
+    def decorator(f):
+        f._command = tuple(args)
+        return f
+    return decorator
+
+
+class CommandHandler(metaclass=Registry):
+    '''Wrapper class to handle a single event in a thread.  Creates its own
+    network clients for thread safety.'''
+
+    def __init__(self, config, event):
+        self._config = config
+        self._event = event
+        self._client = WebClient(token=config.slack_token)
+        self._bzapi = bugzilla.Bugzilla(config.bugzilla,
+                api_key=config.bugzilla_key, force_rest=True)
+        self._called = False
+
+    def __call__(self):
+        assert not self._called
+        self._called = True
+
+        message = self._event.text.replace(f'<@{self._config.bot_id}>', '').strip()
+        words = message.split()
+        # Match the longest available subcommand
+        for count in range(len(words), 0, -1):
+            f = self._registry.get(tuple(words[:count]))
+            if f is not None:
+                # report_errors() requires the config to be the first argument
+                threading.Thread(
+                    target=report_errors(lambda _config, f, *args: f(*args)),
+                    name=f.__name__,
+                    args=(self._config, f, self, *words[count:])
+                ).start()
+                return
+
+        # Tried all possible subcommand lengths, found nothing in registry
+        self._reply(f"I didn't understand that.  Try `<@{self._config.bot_id}> help`")
+
+    def _complete(self):
+        '''Add a success emoji to a command mention.'''
+        self._client.reactions_add(channel=self._event.channel,
+                name='ballot_box_with_check', timestamp=self._event.ts)
+
+    def _reply(self, message, at_user=True):
+        '''Reply to a command mention.'''
+        if at_user:
+            message = f"<@{self._event.user}> {message}"
+        self._client.chat_postMessage(channel=self._event.channel,
+                text=message,
+                # start a new thread or continue the existing one
+                thread_ts=self._event.get('thread_ts', self._event.ts))
+
+    @register('ping')
+    def _ping(self, *_args):
+        # Check Bugzilla connectivity
+        try:
+            if not self._bzapi.logged_in:
+                raise Exception('Not logged in.')
+        except Exception:
+            # Swallow exception details and just report the failure
+            self._reply('Cannot contact Bugzilla.')
+            return
+        self._complete()
+
+    @register('help')
+    def _help(self, *_args):
+        self._reply(HELP, at_user=False)
+
+    @register('throw')
+    def _throw(self, *_args):
+        # undocumented
+        self._complete()
+        raise Exception(f'Throwing exception as requested by <@{self._event.user}>')
+
+
 @report_errors
 def process_event(config, socket_client, req):
     '''Handler for a Slack event.'''
-    client = socket_client.web_client
     payload = DottedDict(req.payload)
-    bzapi = bugzilla.Bugzilla(config.bugzilla, api_key=config.bugzilla_key,
-            force_rest=True)
-
-    def complete_command():
-        '''Add a success emoji to a command mention.'''
-        client.reactions_add(channel=payload.event.channel,
-                name='ballot_box_with_check', timestamp=payload.event.ts)
-
-    def fail_command(message):
-        '''Reply to a command mention with an error.'''
-        client.chat_postMessage(channel=payload.event.channel,
-                text=f"<@{payload.event.user}> {message}",
-                # start a new thread or continue the existing one
-                thread_ts=payload.event.get('thread_ts', payload.event.ts))
 
     if req.type == 'events_api' and payload.event.type == 'app_mention':
         if payload.event.channel != config.channel:
@@ -138,27 +217,7 @@ def process_event(config, socket_client, req):
                 # retries.  Detect and ignore those after acknowledging.
                 return
 
-        message = payload.event.text.replace(f'<@{config.bot_id}>', '').strip()
-        if message == 'ping':
-            # Check Bugzilla connectivity
-            try:
-                if not bzapi.logged_in:
-                    raise Exception('Not logged in.')
-            except Exception:
-                # Swallow exception details and just report the failure
-                fail_command('Cannot contact Bugzilla.')
-                return
-            complete_command()
-        elif message == 'help':
-            client.chat_postMessage(channel=payload.event.channel, text=HELP,
-                    # start a new thread or continue the existing one
-                    thread_ts=payload.event.get('thread_ts', payload.event.ts))
-        elif message == 'throw':
-            # undocumented
-            complete_command()
-            raise Exception(f'Throwing exception as requested by <@{payload.event.user}>')
-        else:
-            fail_command(f"I didn't understand that.  Try `<@{config.bot_id}> help`")
+        CommandHandler(config, payload.event)()
 
 
 def main():
