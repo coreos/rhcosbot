@@ -52,7 +52,8 @@ class Database:
 
     def __enter__(self):
         '''Start a database transaction.'''
-        return self._db.__enter__()
+        self._db.__enter__()
+        return self
 
     def __exit__(self, *args, **kwargs):
         '''Commit a database transaction.'''
@@ -105,7 +106,6 @@ def process_event(config, socket_client, req):
     '''Handler for a Slack event.'''
     client = socket_client.web_client
     payload = DottedDict(req.payload)
-    db = Database(config)
     bzapi = bugzilla.Bugzilla(config.bugzilla, api_key=config.bugzilla_key,
             force_rest=True)
 
@@ -121,44 +121,44 @@ def process_event(config, socket_client, req):
                 # start a new thread or continue the existing one
                 thread_ts=payload.event.get('thread_ts', payload.event.ts))
 
-    with db:
-        if req.type == 'events_api' and payload.event.type == 'app_mention':
-            if payload.event.channel != config.channel:
-                # Don't even acknowledge events outside our channel, to
-                # avoid interfering with separate instances in other
-                # channels.
-                return
+    if req.type == 'events_api' and payload.event.type == 'app_mention':
+        if payload.event.channel != config.channel:
+            # Don't even acknowledge events outside our channel, to
+            # avoid interfering with separate instances in other
+            # channels.
+            return
 
-            # Acknowledge the event, as required by Slack.
-            resp = SocketModeResponse(envelope_id=req.envelope_id)
-            socket_client.send_socket_mode_response(resp)
+        # Acknowledge the event, as required by Slack.
+        resp = SocketModeResponse(envelope_id=req.envelope_id)
+        socket_client.send_socket_mode_response(resp)
 
+        with Database(config) as db:
             if not db.add_event(payload.event.channel, payload.event.event_ts):
                 # When we ignore some events, Slack can send us duplicate
                 # retries.  Detect and ignore those after acknowledging.
                 return
 
-            message = payload.event.text.replace(f'<@{config.bot_id}>', '').strip()
-            if message == 'ping':
-                # Check Bugzilla connectivity
-                try:
-                    if not bzapi.logged_in:
-                        raise Exception('Not logged in.')
-                except Exception:
-                    # Swallow exception details and just report the failure
-                    fail_command('Cannot contact Bugzilla.')
-                    return
-                complete_command()
-            elif message == 'help':
-                client.chat_postMessage(channel=payload.event.channel, text=HELP,
-                        # start a new thread or continue the existing one
-                        thread_ts=payload.event.get('thread_ts', payload.event.ts))
-            elif message == 'throw':
-                # undocumented
-                complete_command()
-                raise Exception(f'Throwing exception as requested by <@{payload.event.user}>')
-            else:
-                fail_command(f"I didn't understand that.  Try `<@{config.bot_id}> help`")
+        message = payload.event.text.replace(f'<@{config.bot_id}>', '').strip()
+        if message == 'ping':
+            # Check Bugzilla connectivity
+            try:
+                if not bzapi.logged_in:
+                    raise Exception('Not logged in.')
+            except Exception:
+                # Swallow exception details and just report the failure
+                fail_command('Cannot contact Bugzilla.')
+                return
+            complete_command()
+        elif message == 'help':
+            client.chat_postMessage(channel=payload.event.channel, text=HELP,
+                    # start a new thread or continue the existing one
+                    thread_ts=payload.event.get('thread_ts', payload.event.ts))
+        elif message == 'throw':
+            # undocumented
+            complete_command()
+            raise Exception(f'Throwing exception as requested by <@{payload.event.user}>')
+        else:
+            fail_command(f"I didn't understand that.  Try `<@{config.bot_id}> help`")
 
 
 def main():
@@ -192,7 +192,6 @@ def main():
             force_rest=True)
     if not bzapi.logged_in:
         raise Exception('Did not authenticate')
-    db = Database(config)
 
     # Start socket-mode listener in the background
     socket_client = SocketModeClient(app_token=config.slack_app_token,
