@@ -109,11 +109,6 @@ def process_event(config, socket_client, req):
     bzapi = bugzilla.Bugzilla(config.bugzilla, api_key=config.bugzilla_key,
             force_rest=True)
 
-    def ack_event():
-        '''Acknowledge the event, as required by Slack.'''
-        resp = SocketModeResponse(envelope_id=req.envelope_id)
-        socket_client.send_socket_mode_response(resp)
-
     def complete_command():
         '''Add a success emoji to a command mention.'''
         client.reactions_add(channel=payload.event.channel,
@@ -133,11 +128,16 @@ def process_event(config, socket_client, req):
                 # avoid interfering with separate instances in other
                 # channels.
                 return
-            ack_event()
+
+            # Acknowledge the event, as required by Slack.
+            resp = SocketModeResponse(envelope_id=req.envelope_id)
+            socket_client.send_socket_mode_response(resp)
+
             if not db.add_event(payload.event.channel, payload.event.event_ts):
                 # When we ignore some events, Slack can send us duplicate
                 # retries.  Detect and ignore those after acknowledging.
                 return
+
             message = payload.event.text.replace(f'<@{config.bot_id}>', '').strip()
             if message == 'ping':
                 # Check Bugzilla connectivity
