@@ -182,11 +182,12 @@ class Registry(type):
         return cls
 
 
-def register(*args, fast=False):
+def register(*args, fast=False, complete=True):
     '''Decorator that registers the subcommand handled by a function.'''
     def decorator(f):
         f._command = tuple(args)
         f._fast = fast
+        f._complete = complete
         return f
     return decorator
 
@@ -230,6 +231,8 @@ class CommandHandler(metaclass=Registry):
                                 timestamp=self._event.ts,
                                 name='hourglass_flowing_sand'
                             )
+                    if f._complete:
+                        self._complete()
                 # report_errors() requires the config to be the first argument
                 threading.Thread(target=wrapper, name=f.__name__,
                         args=(self._config,)).start()
@@ -383,9 +386,8 @@ class CommandHandler(metaclass=Registry):
 
         report.reverse()
         self._reply(f'Backport bugs: {", ".join(report)}', at_user=False)
-        self._complete()
 
-    @register('release', 'list', fast=True)
+    @register('release', 'list', fast=True, complete=False)
     def _release_list(self, *args):
         report = []
         for rel in reversed(self._config.releases.values()):
@@ -402,13 +404,12 @@ class CommandHandler(metaclass=Registry):
         except Exception:
             # Swallow exception details and just report the failure
             self._fail('Cannot contact Bugzilla.')
-        self._complete()
 
-    @register('help', fast=True)
+    @register('help', fast=True, complete=False)
     def _help(self, *_args):
         self._reply(HELP, at_user=False)
 
-    @register('throw', fast=True)
+    @register('throw', fast=True, complete=False)
     def _throw(self, *_args):
         # undocumented
         self._complete()
