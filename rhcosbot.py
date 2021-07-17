@@ -128,10 +128,11 @@ class Registry(type):
         return cls
 
 
-def register(*args):
+def register(*args, fast=False):
     '''Decorator that registers the subcommand handled by a function.'''
     def decorator(f):
         f._command = tuple(args)
+        f._fast = fast
         return f
     return decorator
 
@@ -158,12 +159,26 @@ class CommandHandler(metaclass=Registry):
         for count in range(len(words), 0, -1):
             f = self._registry.get(tuple(words[:count]))
             if f is not None:
+                @report_errors
+                def wrapper(_config):
+                    if not f._fast:
+                        self._client.reactions_add(
+                            channel=self._event.channel,
+                            timestamp=self._event.ts,
+                            name='hourglass_flowing_sand'
+                        )
+                    try:
+                        f(self, *words[count:])
+                    finally:
+                        if not f._fast:
+                            self._client.reactions_remove(
+                                channel=self._event.channel,
+                                timestamp=self._event.ts,
+                                name='hourglass_flowing_sand'
+                            )
                 # report_errors() requires the config to be the first argument
-                threading.Thread(
-                    target=report_errors(lambda _config, f, *args: f(*args)),
-                    name=f.__name__,
-                    args=(self._config, f, self, *words[count:])
-                ).start()
+                threading.Thread(target=wrapper, name=f.__name__,
+                        args=(self._config,)).start()
                 return
 
         # Tried all possible subcommand lengths, found nothing in registry
@@ -187,7 +202,7 @@ class CommandHandler(metaclass=Registry):
         self._reply(message)
         raise HandledError()
 
-    @register('ping')
+    @register('ping', fast=True)
     def _ping(self, *_args):
         # Check Bugzilla connectivity
         try:
@@ -198,11 +213,11 @@ class CommandHandler(metaclass=Registry):
             self._fail('Cannot contact Bugzilla.')
         self._complete()
 
-    @register('help')
+    @register('help', fast=True)
     def _help(self, *_args):
         self._reply(HELP, at_user=False)
 
-    @register('throw')
+    @register('throw', fast=True)
     def _throw(self, *_args):
         # undocumented
         self._complete()
