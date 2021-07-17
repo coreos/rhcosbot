@@ -449,18 +449,40 @@ class CommandHandler(metaclass=Registry):
         )
         report = []
         for caption, status in sections:
-            subreport = []
             bootimages = self._get_bootimages(status=status)
             if not bootimages:
                 continue
+            report.append(f'{caption}:')
             for label, rel in reversed(self._config.releases.items()):
                 try:
                     bootimage = bootimages[label]
                 except KeyError:
                     # nothing for this release
                     continue
-                subreport.append(f'<{self._config.bugzilla_bug_url}{bootimage.id}|{label}>')
-            report.append(f'{caption}: {", ".join(subreport)}')
+                # Find bugs attached to this bootimage bump
+                query = self._bzapi.build_query(
+                    product=self._config.bugzilla_product,
+                    component=self._config.bugzilla_component,
+                    dependson=[bootimage.id],
+                    include_fields=[
+                        'cf_devel_whiteboard',
+                    ],
+                )
+                query.update({
+                    'f1': 'cf_devel_whiteboard',
+                    'o1': 'allwords',
+                    'v1': self.BOOTIMAGE_BUG_WHITEBOARD,
+                })
+                subreport = []
+                for bug in self._bzapi.query(query):
+                    link = f'<{self._config.bugzilla_bug_url}{bug.id}|{bug.id}>'
+                    whiteboard = bug.cf_devel_whiteboard.split()
+                    if self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
+                        link = f'~{link}~'
+                    subreport.append(link)
+                if not subreport:
+                    subreport.append('_no bugs_')
+                report.append(f'<{self._config.bugzilla_bug_url}{bootimage.id}|{label}>: {", ".join(subreport)}')
         self._client.chat_postMessage(channel=self._event.channel,
                 text='\n'.join(report))
 
