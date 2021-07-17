@@ -4,6 +4,7 @@
 
 import argparse
 import bugzilla
+from collections import OrderedDict
 from dotted_dict import DottedDict
 from functools import reduce, wraps
 import os
@@ -21,6 +22,7 @@ import yaml
 ISSUE_LINK = 'https://github.com/bgilbert/rhcosbot/issues'
 HELP = f'''
 I understand these commands:
+`backport <bz-url-or-id> <minimum-release>` - ensure there are backport bugs down to minimum-release
 `ping` - check whether the bot is running properly
 `help` - print this message
 Report problems <{ISSUE_LINK}|here>.
@@ -81,6 +83,57 @@ class Database:
 class HandledError(Exception):
     '''An exception which should just be swallowed.'''
     pass
+
+
+class Release:
+    '''One release specification from the config.'''
+
+    def __init__(self, config_struct):
+        self.label = config_struct.label
+        self.target = config_struct.bz_target
+        self.aliases = config_struct.get('bz_target_aliases', [])
+
+    def __repr__(self):
+        return f'<{self.__class__.__name__} {self.label}>'
+
+    def has_target(self, target):
+        return target == self.target or target in self.aliases
+
+
+class Releases(OrderedDict):
+    '''Release specifications from the config, keyed by the label.'''
+
+    @classmethod
+    def from_config(cls, config):
+        ret = cls()
+        for struct in config.releases:
+            rel = Release(struct)
+            ret[rel.label] = rel
+        return ret
+
+    @property
+    def current(self):
+        '''Return the current release.'''
+        return next(iter(self.values()))
+
+    @property
+    def previous(self):
+        '''Return previous releases.'''
+        ret = self.copy()
+        ret.popitem(last=False)
+        return ret
+
+    def at_least(self, label):
+        '''Return all releases >= the specified label, or all releases if
+        no label is specified.'''
+        if label is None:
+            return self.copy()
+        ret = self.__class__()
+        for rel in self.values():
+            ret[rel.label] = rel
+            if rel.label == label:
+                return ret
+        raise KeyError(label)
 
 
 def report_errors(f):
@@ -202,6 +255,135 @@ class CommandHandler(metaclass=Registry):
         self._reply(message)
         raise HandledError()
 
+    def _getbug(self, desc, fields=[]):
+        '''Query Bugzilla for a bug.  desc can be a bug number, or a string
+        with a bug number, or a BZ URL with optional anchor.'''
+
+        # Convert desc to integer
+        if isinstance(desc, str):
+            # Slack puts URLs inside <>.
+            try:
+                bz = int(desc.replace(self._config.bugzilla_bug_url, '', 1). \
+                        split('#')[0]. \
+                        strip(' <>'))
+            except ValueError:
+                self._fail("Invalid bug number.")
+        else:
+            bz = desc
+
+        # Query Bugzilla
+        fields = fields + ['product', 'component']
+        try:
+            bug = self._bzapi.getbug(bz, include_fields=fields)
+        except IndexError:
+            self._fail(f"Couldn't find bug {bz}.")
+
+        # Basic validation that it's safe to operate on this bug
+        if bug.product != self._config.bugzilla_product:
+            self._fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
+        if bug.component != self._config.bugzilla_component:
+            self._fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
+
+        return bug
+
+    def _get_backports(self, bug, fields=[], min_ver=None):
+        '''Follow the backport bug chain from the specified bug dict, until
+        we reach min_ver or run out of bugs or configured releases.  Return
+        a list of bug dicts from newest to oldest release, including the
+        specified Bugzilla fields.  Fail if the specified BZ doesn't match
+        the configured current release.'''
+
+        # Check bug invariants
+        bug_target = bug.target_release[0]
+        if not self._config.releases.current.has_target(bug_target):
+            self._fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
+
+        # Walk each backport version
+        cur_bug = bug
+        ret = []
+        for rel in self._config.releases.at_least(min_ver).previous.values():
+            # Check for an existing clone with this target release or
+            # one of its aliases
+            query = self._bzapi.build_query(
+                product=bug.product,
+                component=bug.component,
+                include_fields=['target_release'] + fields,
+            )
+            query['cf_clone_of'] = cur_bug.id
+            candidates = [
+                b for b in self._bzapi.query(query)
+                if rel.has_target(b.target_release[0])
+            ]
+            if len(candidates) > 1:
+                bzlist = ', '.join(str(b.id) for b in candidates)
+                self._fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
+            if len(candidates) == 0:
+                break
+            cur_bug = candidates[0]
+            ret.append(cur_bug)
+        return ret
+
+    @register('backport')
+    def _backport(self, *args):
+        '''Ensure the existence of backport bugs for the specified BZ,
+        in all releases >= the specified one.'''
+        # Parse arguments
+        try:
+            desc, min_ver = args
+        except ValueError:
+            self._fail(f'Bad arguments; expect `bug minimum-release`.')
+
+        # Fail if release is invalid or current
+        if min_ver not in self._config.releases:
+            self._fail(f'Unknown release "{escape(min_ver)}".')
+        if min_ver == self._config.releases.current.label:
+            self._fail(f"{escape(min_ver)} is the current release; can't backport.")
+
+        # Look up the bug.  This validates the product and component.
+        bug = self._getbug(desc, [
+            'assigned_to',
+            'severity',
+            'summary',
+            'target_release',
+            'version',
+        ])
+        if bug.severity == 'unspecified':
+            # Eric-Paris-bot will unset the target version without a severity
+            self._fail("Bug severity is not set; can't backport.")
+
+        # Query existing backport bugs
+        backports = self._get_backports(bug, min_ver=min_ver)
+
+        # Walk each backport version
+        cur_bug = bug
+        report = []
+        for rel in self._config.releases.at_least(min_ver).previous.values():
+            if backports:
+                # Have an existing bug
+                cur_bug = backports.pop(0)
+                report.append(f'<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>')
+            else:
+                # Make a new one
+                info = self._bzapi.build_createbug(
+                    product=bug.product,
+                    component=bug.component,
+                    version=bug.version,
+                    summary=f'[{rel.label}] {bug.summary}',
+                    description=f'Backport the fix for bug {bug.id} to {rel.label}.',
+                    assigned_to=bug.assigned_to,
+                    depends_on=[cur_bug.id],
+                    severity=bug.severity,
+                    status='ASSIGNED',
+                    target_release=rel.target
+                )
+                info['cf_clone_of'] = cur_bug.id
+                cur_bug = self._bzapi.createbug(info)
+                report.append(f'*<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>*')
+
+        report.reverse()
+        self._reply(f'Backport bugs: {", ".join(report)}', at_user=False)
+        self._complete()
+
     @register('ping', fast=True)
     def _ping(self, *_args):
         # Check Bugzilla connectivity
@@ -262,6 +444,7 @@ def main():
     with open(os.path.expanduser(args.config)) as fh:
         config = DottedDict(yaml.safe_load(fh))
         config.database = os.path.expanduser(args.database)
+        config.releases = Releases.from_config(config)
     env_map = (
         ('RHCOSBOT_SLACK_APP_TOKEN', 'slack-app-token'),
         ('RHCOSBOT_SLACK_TOKEN', 'slack-token'),

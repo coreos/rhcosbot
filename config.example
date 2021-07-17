@@ -22,3 +22,14 @@ bugzilla-product: OpenShift Container Platform
 bugzilla-component: RHCOS
 # Default assignee for bootimage bugs
 bugzilla-assignee: bovik@example.com
+
+# Possible RHCOS target releases, newest first
+releases:
+  # Friendly name for the release
+  - label: "4.3"
+    # The preferred Bugzilla target release
+    bz-target: 4.3.0
+  - label: "4.2"
+    bz-target: 4.2.z
+    # Other recognized Bugzilla target releases
+    bz-target-aliases: [4.2.0]
