@@ -8,7 +8,6 @@ from collections import OrderedDict
 from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import os
-import signal
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode import SocketModeClient
@@ -661,6 +660,7 @@ def main():
             force_rest=True)
     if not bzapi.logged_in:
         raise Exception('Did not authenticate')
+    db = Database(config)
 
     # Start socket-mode listener in the background
     socket_client = SocketModeClient(app_token=config.slack_app_token,
@@ -669,8 +669,11 @@ def main():
             lambda socket_client, req: process_event(config, socket_client, req))
     socket_client.connect()
 
+    # Clean up database every hour
     while True:
-        signal.pause()
+        with db:
+            db.prune_events()
+        time.sleep(3600)
 
 
 if __name__ == '__main__':
