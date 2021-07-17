@@ -24,6 +24,7 @@ HELP = f'''
 I understand these commands:
 `backport <bz-url-or-id> <minimum-release>` - ensure there are backport bugs down to minimum-release
 `bootimage list` - list upcoming bootimage bumps
+`bootimage bug add <bz-url-or-id>` - add a bug and its backports to planned bootimage bumps
 `release list` - list known releases
 `ping` - check whether the bot is running properly
 `help` - print this message
@@ -214,6 +215,9 @@ class CommandHandler(metaclass=Registry):
     network clients for thread safety.'''
 
     BOOTIMAGE_WHITEBOARD = 'bootimage'
+    # Can't use hyphens or underscores, since those count as a word boundary
+    BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
+    BOOTIMAGE_BUG_READY_WHITEBOARD = 'bootimageReady'
 
     def __init__(self, config, event):
         self._config = config
@@ -458,6 +462,67 @@ class CommandHandler(metaclass=Registry):
             report.append(f'{caption}: {", ".join(subreport)}')
         self._client.chat_postMessage(channel=self._event.channel,
                 text='\n'.join(report))
+
+    @register('bootimage', 'bug', 'add')
+    def _bootimage_bug_add(self, *args):
+        '''Add a bug and its backports to planned bootimage bumps.'''
+        # Parse arguments
+        try:
+            desc = args[0]
+        except ValueError:
+            self._fail(f'Bad arguments; expect `bug`.')
+
+        # Look up the bug.  This validates the product and component.
+        bug = self._getbug(desc, [
+            'cf_devel_whiteboard',
+            'status',
+            'target_release',
+        ])
+
+        # Get planned bootimage bumps
+        bootimages = self._get_bootimages()
+
+        # Get bug and its backports
+        bugs = [bug] + self._get_backports(bug, fields=[
+            'cf_devel_whiteboard',
+            'status',
+            'target_release',
+        ])
+
+        # First, do checks
+        for rel, cur_bug in zip(self._config.releases.values(), bugs):
+            assert rel.has_target(cur_bug.target_release[0])
+            if rel.label not in bootimages:
+                self._fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
+            whiteboard = cur_bug.cf_devel_whiteboard.split()
+            if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+                if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
+                    self._fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
+
+        # Add to bootimage bumps; generate report
+        report = []
+        for rel, cur_bug in zip(self._config.releases.values(), bugs):
+            whiteboard = cur_bug.cf_devel_whiteboard.split()
+            link = f'<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>'
+            if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+                # not in bootimage bump; add
+                bootimage = bootimages[rel.label]
+                update = self._bzapi.build_update(
+                    depends_on_add=[bootimage.id],
+                )
+                update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_WHITEBOARD}'
+                self._bzapi.update_bugs([cur_bug.id], update)
+                report.append(f'*{link}*')
+            elif self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
+                # in bootimage bump and ready; render with strikeout
+                report.append(f'~{link}~')
+            else:
+                # in bootimage bump
+                report.append(link)
+
+        # Show report
+        report.reverse()
+        self._reply(f'Queued for bootimage: {", ".join(report)}', at_user=False)
 
     @register('release', 'list', fast=True, complete=False)
     def _release_list(self, *args):
