@@ -25,6 +25,7 @@ I understand these commands:
 `backport <bz-url-or-id> <minimum-release>` - ensure there are backport bugs down to minimum-release
 `bootimage list` - list upcoming bootimage bumps
 `bootimage bug add <bz-url-or-id>` - add a bug and its backports to planned bootimage bumps
+`bootimage bug ready <bz-url-or-id>` - mark a bug landed in plashet and waiting for bootimage
 `release list` - list known releases
 `ping` - check whether the bot is running properly
 `help` - print this message
@@ -523,6 +524,34 @@ class CommandHandler(metaclass=Registry):
         # Show report
         report.reverse()
         self._reply(f'Queued for bootimage: {", ".join(report)}', at_user=False)
+
+    @register('bootimage', 'bug', 'ready')
+    def _bootimage_bug_ready(self, *args):
+        '''Mark a bug ready for its bootimage bump.'''
+        # Parse arguments
+        try:
+            desc = args[0]
+        except ValueError:
+            self._fail(f'Bad arguments; expect `bug`.')
+
+        # Look up the bug.  This validates the product and component.
+        bug = self._getbug(desc, [
+            'cf_devel_whiteboard',
+            'status',
+        ])
+
+        whiteboard = bug.cf_devel_whiteboard.split()
+        if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+            self._fail(f'Bug {bug.id} is not attached to a bootimage bump.')
+        if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
+            self._fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
+        if self.BOOTIMAGE_BUG_READY_WHITEBOARD not in whiteboard:
+            update = self._bzapi.build_update(
+                status='POST',
+                comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
+            )
+            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_READY_WHITEBOARD}'
+            self._bzapi.update_bugs([bug.id], update)
 
     @register('release', 'list', fast=True, complete=False)
     def _release_list(self, *args):
