@@ -23,6 +23,7 @@ ISSUE_LINK = 'https://github.com/bgilbert/rhcosbot/issues'
 HELP = f'''
 I understand these commands:
 `backport <bz-url-or-id> <minimum-release>` - ensure there are backport bugs down to minimum-release
+`release list` - list known releases
 `ping` - check whether the bot is running properly
 `help` - print this message
 Report problems <{ISSUE_LINK}|here>.
@@ -383,6 +384,14 @@ class CommandHandler(metaclass=Registry):
         report.reverse()
         self._reply(f'Backport bugs: {", ".join(report)}', at_user=False)
         self._complete()
+
+    @register('release', 'list', fast=True)
+    def _release_list(self, *args):
+        report = []
+        for rel in reversed(self._config.releases.values()):
+            report.append(f'{rel.label}: *{rel.target}* {" ".join(rel.aliases)}')
+        body = "\n".join(report)
+        self._reply(f'Release: *default-target* other-targets\n{body}\n', at_user=False)
 
     @register('ping', fast=True)
     def _ping(self, *_args):
