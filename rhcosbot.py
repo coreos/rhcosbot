@@ -6,7 +6,7 @@ import argparse
 import bugzilla
 from collections import OrderedDict
 from dotted_dict import DottedDict
-from functools import reduce, wraps
+from functools import cached_property, reduce, wraps
 import os
 import signal
 from slack_sdk import WebClient
@@ -23,6 +23,7 @@ ISSUE_LINK = 'https://github.com/bgilbert/rhcosbot/issues'
 HELP = f'''
 I understand these commands:
 `backport <bz-url-or-id> <minimum-release>` - ensure there are backport bugs down to minimum-release
+`bootimage list` - list upcoming bootimage bumps
 `release list` - list known releases
 `ping` - check whether the bot is running properly
 `help` - print this message
@@ -107,9 +108,15 @@ class Releases(OrderedDict):
     @classmethod
     def from_config(cls, config):
         ret = cls()
+        targets = set()
         for struct in config.releases:
             rel = Release(struct)
             ret[rel.label] = rel
+            # Validate that there are no duplicate targets
+            for target in [rel.target] + rel.aliases:
+                if target in targets:
+                    raise ValueError(f'Duplicate target version "{target}"')
+                targets.add(target)
         return ret
 
     @property
@@ -135,6 +142,16 @@ class Releases(OrderedDict):
             if rel.label == label:
                 return ret
         raise KeyError(label)
+
+    @cached_property
+    def by_target(self):
+        '''Return a map from target to Release.'''
+        ret = {}
+        for rel in self.values():
+            ret[rel.target] = rel
+            for alias in rel.aliases:
+                ret[alias] = rel
+        return ret
 
 
 def report_errors(f):
@@ -195,6 +212,8 @@ def register(*args, fast=False, complete=True):
 class CommandHandler(metaclass=Registry):
     '''Wrapper class to handle a single event in a thread.  Creates its own
     network clients for thread safety.'''
+
+    BOOTIMAGE_WHITEBOARD = 'bootimage'
 
     def __init__(self, config, event):
         self._config = config
@@ -327,6 +346,34 @@ class CommandHandler(metaclass=Registry):
             ret.append(cur_bug)
         return ret
 
+    def _get_bootimages(self, status='ASSIGNED', fields=[]):
+        '''Get a map from release label to bootimage bump bug with the
+        specified status.  Fail if any release has multiple bootimage bumps
+        with that status.  Include the specified bug fields.'''
+
+        query = self._bzapi.build_query(
+            product=self._config.bugzilla_product,
+            component=self._config.bugzilla_component,
+            status=status,
+            include_fields=['target_release'] + fields,
+        )
+        query.update({
+            'f1': 'cf_devel_whiteboard',
+            'o1': 'allwords',
+            'v1': self.BOOTIMAGE_WHITEBOARD,
+        })
+        ret = {}
+        for bug in self._bzapi.query(query):
+            try:
+                rel = self._config.releases.by_target[bug.target_release[0]]
+            except KeyError:
+                # unknown target release; ignore
+                continue
+            if rel.label in ret:
+                self._fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
+            ret[rel.label] = bug
+        return ret
+
     @register('backport')
     def _backport(self, *args):
         '''Ensure the existence of backport bugs for the specified BZ,
@@ -386,6 +433,31 @@ class CommandHandler(metaclass=Registry):
 
         report.reverse()
         self._reply(f'Backport bugs: {", ".join(report)}', at_user=False)
+
+    @register('bootimage', 'list')
+    def _bootimage_list(self, *args):
+        '''List bootimage bump BZs.'''
+
+        sections = (
+            ('Planned bootimage bumps', 'ASSIGNED'),
+            ('Pending bootimage bumps', 'POST'),
+        )
+        report = []
+        for caption, status in sections:
+            subreport = []
+            bootimages = self._get_bootimages(status=status)
+            if not bootimages:
+                continue
+            for label, rel in reversed(self._config.releases.items()):
+                try:
+                    bootimage = bootimages[label]
+                except KeyError:
+                    # nothing for this release
+                    continue
+                subreport.append(f'<{self._config.bugzilla_bug_url}{bootimage.id}|{label}>')
+            report.append(f'{caption}: {", ".join(subreport)}')
+        self._client.chat_postMessage(channel=self._event.channel,
+                text='\n'.join(report))
 
     @register('release', 'list', fast=True, complete=False)
     def _release_list(self, *args):
