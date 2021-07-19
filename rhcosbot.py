@@ -326,6 +326,26 @@ class CommandHandler(metaclass=Registry):
 
         return bug
 
+    def _query(self, fields=[], whiteboard=None, extra={}, **kwargs):
+        '''Search Bugzilla.  kwargs are passed to build_query().  Arguments
+        not supported by build_query can be passed in extra and will be
+        applied to the query dict afterward.'''
+
+        query = self._bzapi.build_query(
+            product=self._config.bugzilla_product,
+            component=self._config.bugzilla_component,
+            include_fields=fields + self.DEFAULT_FIELDS,
+            **kwargs
+        )
+        query.update(extra)
+        if whiteboard is not None:
+            query.update({
+                'f1': 'cf_devel_whiteboard',
+                'o1': 'allwords',
+                'v1': whiteboard,
+            })
+        return sorted(self._bzapi.query(query), key=lambda b: b.id)
+
     def _get_backports(self, bug, fields=[], min_ver=None):
         '''Follow the backport bug chain from the specified bug dict, until
         we reach min_ver or run out of bugs or configured releases.  Return
@@ -344,14 +364,11 @@ class CommandHandler(metaclass=Registry):
         for rel in self._config.releases.at_least(min_ver).previous.values():
             # Check for an existing clone with this target release or
             # one of its aliases
-            query = self._bzapi.build_query(
-                product=bug.product,
-                component=bug.component,
-                include_fields=['target_release'] + fields,
-            )
-            query['cf_clone_of'] = cur_bug.id
+            candidates = self._query(fields=fields, extra={
+                'cf_clone_of': cur_bug.id,
+            })
             candidates = [
-                b for b in self._bzapi.query(query)
+                b for b in candidates
                 if rel.has_target(b.target_release[0])
             ]
             if len(candidates) > 1:
@@ -368,19 +385,10 @@ class CommandHandler(metaclass=Registry):
         specified status.  Fail if any release has multiple bootimage bumps
         with that status.  Include the specified bug fields.'''
 
-        query = self._bzapi.build_query(
-            product=self._config.bugzilla_product,
-            component=self._config.bugzilla_component,
-            status=status,
-            include_fields=['target_release'] + fields,
-        )
-        query.update({
-            'f1': 'cf_devel_whiteboard',
-            'o1': 'allwords',
-            'v1': self.BOOTIMAGE_WHITEBOARD,
-        })
+        bugs = self._query(fields=fields, status=status,
+                whiteboard=self.BOOTIMAGE_WHITEBOARD)
         ret = {}
-        for bug in self._bzapi.query(query):
+        for bug in bugs:
             try:
                 rel = self._config.releases.by_target[bug.target_release[0]]
             except KeyError:
@@ -470,21 +478,10 @@ class CommandHandler(metaclass=Registry):
                     # nothing for this release
                     continue
                 # Find bugs attached to this bootimage bump
-                query = self._bzapi.build_query(
-                    product=self._config.bugzilla_product,
-                    component=self._config.bugzilla_component,
-                    dependson=[bootimage.id],
-                    include_fields=[
-                        'cf_devel_whiteboard',
-                    ],
-                )
-                query.update({
-                    'f1': 'cf_devel_whiteboard',
-                    'o1': 'allwords',
-                    'v1': self.BOOTIMAGE_BUG_WHITEBOARD,
-                })
+                bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+                        dependson=[bootimage.id])
                 subreport = []
-                for bug in self._bzapi.query(query):
+                for bug in bugs:
                     link = f'<{self._config.bugzilla_bug_url}{bug.id}|{bug.id}>'
                     whiteboard = bug.cf_devel_whiteboard.split()
                     if self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
@@ -512,11 +509,7 @@ class CommandHandler(metaclass=Registry):
         bootimages = self._get_bootimages()
 
         # Get bug and its backports
-        bugs = [bug] + self._get_backports(bug, fields=[
-            'cf_devel_whiteboard',
-            'status',
-            'target_release',
-        ])
+        bugs = [bug] + self._get_backports(bug)
 
         # First, do checks
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
