@@ -243,6 +243,12 @@ class CommandHandler(metaclass=Registry):
                         self._react('hourglass_flowing_sand')
                     try:
                         f(self, *words[count:])
+                    except HandledError:
+                        self._react('x')
+                        raise
+                    except Exception:
+                        self._react('boom')
+                        raise
                     finally:
                         if not f._fast:
                             self._client.reactions_remove(
@@ -251,7 +257,7 @@ class CommandHandler(metaclass=Registry):
                                 name='hourglass_flowing_sand'
                             )
                     if f._complete:
-                        self._complete()
+                        self._react('ballot_box_with_check')
                 # report_errors() requires the config to be the first argument
                 threading.Thread(target=wrapper, name=f.__name__,
                         args=(self._config,)).start()
@@ -259,15 +265,12 @@ class CommandHandler(metaclass=Registry):
 
         # Tried all possible subcommand lengths, found nothing in registry
         self._reply(f"I didn't understand that.  Try `<@{self._config.bot_id}> help`")
+        self._react('x')
 
     def _react(self, name):
         '''Add an emoji to a command mention.'''
         self._client.reactions_add(channel=self._event.channel,
                 name=name, timestamp=self._event.ts)
-
-    def _complete(self):
-        '''Add a success emoji to a command mention.'''
-        self._react('ballot_box_with_check')
 
     def _reply(self, message, at_user=True):
         '''Reply to a command mention.'''
@@ -599,7 +602,6 @@ class CommandHandler(metaclass=Registry):
     @register('throw', fast=True, complete=False)
     def _throw(self, *_args):
         # undocumented
-        self._complete()
         raise Exception(f'Throwing exception as requested by <@{self._event.user}>')
 
 
