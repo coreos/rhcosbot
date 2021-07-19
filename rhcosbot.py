@@ -219,6 +219,16 @@ class CommandHandler(metaclass=Registry):
     BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
     BOOTIMAGE_BUG_READY_WHITEBOARD = 'bootimageReady'
 
+    # Some standard BZ fields that we usually want
+    DEFAULT_FIELDS = [
+        'cf_devel_whiteboard',
+        'component',
+        'product',
+        'summary',
+        'status',
+        'target_release',
+    ]
+
     def __init__(self, config, event):
         self._config = config
         self._event = event
@@ -302,7 +312,7 @@ class CommandHandler(metaclass=Registry):
             bz = desc
 
         # Query Bugzilla
-        fields = fields + ['product', 'component']
+        fields = fields + self.DEFAULT_FIELDS
         try:
             bug = self._bzapi.getbug(bz, include_fields=fields)
         except IndexError:
@@ -401,8 +411,6 @@ class CommandHandler(metaclass=Registry):
         bug = self._getbug(desc, [
             'assigned_to',
             'severity',
-            'summary',
-            'target_release',
             'version',
         ])
         if bug.severity == 'unspecified':
@@ -498,11 +506,7 @@ class CommandHandler(metaclass=Registry):
             self._fail(f'Bad arguments; expect `bug`.')
 
         # Look up the bug.  This validates the product and component.
-        bug = self._getbug(desc, [
-            'cf_devel_whiteboard',
-            'status',
-            'target_release',
-        ])
+        bug = self._getbug(desc)
 
         # Get planned bootimage bumps
         bootimages = self._get_bootimages()
@@ -559,10 +563,7 @@ class CommandHandler(metaclass=Registry):
             self._fail(f'Bad arguments; expect `bug`.')
 
         # Look up the bug.  This validates the product and component.
-        bug = self._getbug(desc, [
-            'cf_devel_whiteboard',
-            'status',
-        ])
+        bug = self._getbug(desc)
 
         whiteboard = bug.cf_devel_whiteboard.split()
         if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
