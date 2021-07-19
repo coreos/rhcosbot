@@ -240,11 +240,7 @@ class CommandHandler(metaclass=Registry):
                 @report_errors
                 def wrapper(_config):
                     if not f._fast:
-                        self._client.reactions_add(
-                            channel=self._event.channel,
-                            timestamp=self._event.ts,
-                            name='hourglass_flowing_sand'
-                        )
+                        self._react('hourglass_flowing_sand')
                     try:
                         f(self, *words[count:])
                     finally:
@@ -264,10 +260,14 @@ class CommandHandler(metaclass=Registry):
         # Tried all possible subcommand lengths, found nothing in registry
         self._reply(f"I didn't understand that.  Try `<@{self._config.bot_id}> help`")
 
+    def _react(self, name):
+        '''Add an emoji to a command mention.'''
+        self._client.reactions_add(channel=self._event.channel,
+                name=name, timestamp=self._event.ts)
+
     def _complete(self):
         '''Add a success emoji to a command mention.'''
-        self._client.reactions_add(channel=self._event.channel,
-                name='ballot_box_with_check', timestamp=self._event.ts)
+        self._react('ballot_box_with_check')
 
     def _reply(self, message, at_user=True):
         '''Reply to a command mention.'''
