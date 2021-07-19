@@ -456,6 +456,17 @@ class CommandHandler(metaclass=Registry):
         # Query existing backport bugs
         backports = self._get_backports(bug, min_ver=min_ver)
 
+        # Query bootimages if needed
+        need_bootimage = self.BOOTIMAGE_BUG_WHITEBOARD in self._whiteboard(bug)
+        if need_bootimage:
+            bootimages = self._get_bootimages()
+
+        # First, do checks
+        for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
+            if need_bootimage:
+                if rel.label not in bootimages:
+                    self._fail(f"Couldn't find bootimage for {rel.label}.")
+
         # Walk each backport version
         cur_bug = bug
         created_bugs = []
@@ -466,6 +477,9 @@ class CommandHandler(metaclass=Registry):
                 cur_bug = backports.pop(0)
             else:
                 # Make a new one
+                depends = [cur_bug.id]
+                if need_bootimage:
+                    depends.append(bootimages[rel.label].id)
                 info = self._bzapi.build_createbug(
                     product=bug.product,
                     component=bug.component,
@@ -473,13 +487,15 @@ class CommandHandler(metaclass=Registry):
                     summary=f'[{rel.label}] {bug.summary}',
                     description=f'Backport the fix for bug {bug.id} to {rel.label}.',
                     assigned_to=bug.assigned_to,
-                    depends_on=[cur_bug.id],
+                    depends_on=depends,
                     groups=bug.groups,
                     severity=bug.severity,
                     status='ASSIGNED',
                     target_release=rel.target
                 )
                 info['cf_clone_of'] = cur_bug.id
+                if need_bootimage:
+                    info['cf_devel_whiteboard'] = self.BOOTIMAGE_BUG_WHITEBOARD
                 bz = self._bzapi.createbug(info).id
                 cur_bug = self._getbug(bz)
                 created_bugs.append(self._bug_link(cur_bug, rel.label))
