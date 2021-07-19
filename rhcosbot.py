@@ -414,13 +414,17 @@ class CommandHandler(metaclass=Registry):
         if bug.status in ('NEW', 'ASSIGNED'):
             return f'*{link}*'
         if bug.status == 'POST':
-            whiteboard = bug.cf_devel_whiteboard.split()
-            if self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
+            if self.BOOTIMAGE_BUG_READY_WHITEBOARD in self._whiteboard(bug):
                 return f'_{link}_'
             return link
         if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
             return f'~{link}~'
         return f'¿{link}?'
+
+    @staticmethod
+    def _whiteboard(bug):
+        '''Return the words in the dev whiteboard for the specified Bug.'''
+        return bug.cf_devel_whiteboard.split()
 
     @register('backport')
     def _backport(self, *args):
@@ -546,8 +550,7 @@ class CommandHandler(metaclass=Registry):
             assert rel.has_target(cur_bug.target_release[0])
             if rel.label not in bootimages:
                 self._fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
-            whiteboard = cur_bug.cf_devel_whiteboard.split()
-            if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+            if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(cur_bug):
                 if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
                     self._fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
 
@@ -555,10 +558,9 @@ class CommandHandler(metaclass=Registry):
         added_bugs = []
         all_bugs = []
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
-            whiteboard = cur_bug.cf_devel_whiteboard.split()
             link = self._bug_link(cur_bug, rel.label)
             all_bugs.append(link)
-            if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+            if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(cur_bug):
                 bootimage = bootimages[rel.label]
                 update = self._bzapi.build_update(
                     depends_on_add=[bootimage.id],
@@ -588,12 +590,11 @@ class CommandHandler(metaclass=Registry):
         # Look up the bug.  This validates the product and component.
         bug = self._getbug(desc)
 
-        whiteboard = bug.cf_devel_whiteboard.split()
-        if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
+        if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(bug):
             self._fail(f'Bug {bug.id} is not attached to a bootimage bump.')
         if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
             self._fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
-        if self.BOOTIMAGE_BUG_READY_WHITEBOARD not in whiteboard:
+        if self.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._whiteboard(bug):
             update = self._bzapi.build_update(
                 status='POST',
                 comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
