@@ -511,9 +511,12 @@ class CommandHandler(metaclass=Registry):
                 bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id])
                 report.append(self._bug_link(bootimage, label) + ':')
+                found = False
                 for bug in bugs:
-                    report.append('• ' + self._bug_link(bug))
-                if not bugs:
+                    if rel.has_target(bug.target_release[0]):
+                        report.append('• ' + self._bug_link(bug))
+                        found = True
+                if not found:
                     report.append('_no bugs_')
         self._client.chat_postMessage(channel=self._event.channel,
                 text='\n'.join(report))
