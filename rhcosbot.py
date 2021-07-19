@@ -510,13 +510,11 @@ class CommandHandler(metaclass=Registry):
                 # Find bugs attached to this bootimage bump
                 bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id])
-                subreport = []
+                report.append(self._bug_link(bootimage, label) + ':')
                 for bug in bugs:
-                    subreport.append(self._bug_link(bug, bug.id))
-                if not subreport:
-                    subreport.append('_no bugs_')
-                bootimage_link = self._bug_link(bootimage, label)
-                report.append(f'{bootimage_link}: {", ".join(subreport)}')
+                    report.append('• ' + self._bug_link(bug))
+                if not bugs:
+                    report.append('_no bugs_')
         self._client.chat_postMessage(channel=self._event.channel,
                 text='\n'.join(report))
 
