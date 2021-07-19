@@ -28,6 +28,14 @@ I understand these commands:
 `release list` - list known releases
 `ping` - check whether the bot is running properly
 `help` - print this message
+
+Bug statuses:
+*NEW, ASSIGNED*
+POST
+_POST and ready for bootimage_
+~MODIFIED, ON_QA, VERIFIED, CLOSED~
+¿Other?
+
 Report problems <{ISSUE_LINK}|here>.
 '''
 
@@ -399,6 +407,21 @@ class CommandHandler(metaclass=Registry):
             ret[rel.label] = bug
         return ret
 
+    def _bug_link(self, bug, text=None):
+        '''Format a Bug into a Slack link.'''
+        text = str(text) if text else bug.summary
+        link = f'<{self._config.bugzilla_bug_url}{str(bug.id)}|{escape(text)}>'
+        if bug.status in ('NEW', 'ASSIGNED'):
+            return f'*{link}*'
+        if bug.status == 'POST':
+            whiteboard = bug.cf_devel_whiteboard.split()
+            if self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
+                return f'_{link}_'
+            return link
+        if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
+            return f'~{link}~'
+        return f'¿{link}?'
+
     @register('backport')
     def _backport(self, *args):
         '''Ensure the existence of backport bugs for the specified BZ,
@@ -430,12 +453,12 @@ class CommandHandler(metaclass=Registry):
 
         # Walk each backport version
         cur_bug = bug
-        report = []
+        created_bugs = []
+        all_bugs = []
         for rel in self._config.releases.at_least(min_ver).previous.values():
             if backports:
                 # Have an existing bug
                 cur_bug = backports.pop(0)
-                report.append(f'<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>')
             else:
                 # Make a new one
                 info = self._bzapi.build_createbug(
@@ -451,11 +474,18 @@ class CommandHandler(metaclass=Registry):
                     target_release=rel.target
                 )
                 info['cf_clone_of'] = cur_bug.id
-                cur_bug = self._bzapi.createbug(info)
-                report.append(f'*<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>*')
+                bz = self._bzapi.createbug(info).id
+                cur_bug = self._getbug(bz)
+                created_bugs.append(self._bug_link(cur_bug, rel.label))
+            all_bugs.append(self._bug_link(cur_bug, rel.label))
 
-        report.reverse()
-        self._reply(f'Backport bugs: {", ".join(report)}', at_user=False)
+        created_bugs.reverse()
+        all_bugs.reverse()
+        message = ''
+        if created_bugs:
+            message += f'Created bugs: {", ".join(created_bugs)}\n'
+        message += f'All backports: {", ".join(all_bugs)}'
+        self._reply(message, at_user=False)
 
     @register('bootimage', 'list')
     def _bootimage_list(self, *args):
@@ -482,14 +512,11 @@ class CommandHandler(metaclass=Registry):
                         dependson=[bootimage.id])
                 subreport = []
                 for bug in bugs:
-                    link = f'<{self._config.bugzilla_bug_url}{bug.id}|{bug.id}>'
-                    whiteboard = bug.cf_devel_whiteboard.split()
-                    if self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
-                        link = f'~{link}~'
-                    subreport.append(link)
+                    subreport.append(self._bug_link(bug, bug.id))
                 if not subreport:
                     subreport.append('_no bugs_')
-                report.append(f'<{self._config.bugzilla_bug_url}{bootimage.id}|{label}>: {", ".join(subreport)}')
+                bootimage_link = self._bug_link(bootimage, label)
+                report.append(f'{bootimage_link}: {", ".join(subreport)}')
         self._client.chat_postMessage(channel=self._event.channel,
                 text='\n'.join(report))
 
@@ -522,29 +549,29 @@ class CommandHandler(metaclass=Registry):
                     self._fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
 
         # Add to bootimage bumps; generate report
-        report = []
+        added_bugs = []
+        all_bugs = []
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             whiteboard = cur_bug.cf_devel_whiteboard.split()
-            link = f'<{self._config.bugzilla_bug_url}{cur_bug.id}|{rel.label}>'
+            link = self._bug_link(cur_bug, rel.label)
+            all_bugs.append(link)
             if self.BOOTIMAGE_BUG_WHITEBOARD not in whiteboard:
-                # not in bootimage bump; add
                 bootimage = bootimages[rel.label]
                 update = self._bzapi.build_update(
                     depends_on_add=[bootimage.id],
                 )
                 update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_WHITEBOARD}'
                 self._bzapi.update_bugs([cur_bug.id], update)
-                report.append(f'*{link}*')
-            elif self.BOOTIMAGE_BUG_READY_WHITEBOARD in whiteboard:
-                # in bootimage bump and ready; render with strikeout
-                report.append(f'~{link}~')
-            else:
-                # in bootimage bump
-                report.append(link)
+                added_bugs.append(link)
 
         # Show report
-        report.reverse()
-        self._reply(f'Queued for bootimage: {", ".join(report)}', at_user=False)
+        added_bugs.reverse()
+        all_bugs.reverse()
+        message = ''
+        if added_bugs:
+            message += f'Added to bootimage: {", ".join(added_bugs)}\n'
+        message += f'All bugs: {", ".join(all_bugs)}'
+        self._reply(message, at_user=False)
 
     @register('bootimage', 'bug', 'ready')
     def _bootimage_bug_ready(self, *args):
