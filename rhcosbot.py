@@ -441,6 +441,7 @@ class CommandHandler(metaclass=Registry):
         # Look up the bug.  This validates the product and component.
         bug = self._getbug(desc, [
             'assigned_to',
+            'groups',
             'severity',
             'version',
         ])
@@ -469,6 +470,7 @@ class CommandHandler(metaclass=Registry):
                     description=f'Backport the fix for bug {bug.id} to {rel.label}.',
                     assigned_to=bug.assigned_to,
                     depends_on=[cur_bug.id],
+                    groups=bug.groups,
                     severity=bug.severity,
                     status='ASSIGNED',
                     target_release=rel.target
