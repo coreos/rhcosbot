@@ -355,11 +355,11 @@ class CommandHandler(metaclass=Registry):
         return sorted(self._bzapi.query(query), key=lambda b: b.id)
 
     def _get_backports(self, bug, fields=[], min_ver=None):
-        '''Follow the backport bug chain from the specified bug dict, until
-        we reach min_ver or run out of bugs or configured releases.  Return
-        a list of bug dicts from newest to oldest release, including the
-        specified Bugzilla fields.  Fail if the specified BZ doesn't match
-        the configured current release.'''
+        '''Follow the backport bug chain from the specified Bug, until we
+        reach min_ver or run out of bugs or configured releases.  Return a
+        list of Bugs from newest to oldest release, including the specified
+        Bugzilla fields.  Fail if the specified BZ doesn't match the
+        configured current release.'''
 
         # Check bug invariants
         bug_target = bug.target_release[0]
