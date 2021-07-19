@@ -522,7 +522,7 @@ class CommandHandler(metaclass=Registry):
             bootimages = self._get_bootimages(status=status)
             if not bootimages:
                 continue
-            report.append(f'{caption}:')
+            report.append(f'*_{caption}_*:')
             for label, rel in reversed(self._config.releases.items()):
                 try:
                     bootimage = bootimages[label]
