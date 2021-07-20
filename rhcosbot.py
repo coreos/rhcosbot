@@ -334,14 +334,19 @@ class CommandHandler(metaclass=Registry):
 
         return bug
 
-    def _query(self, fields=[], whiteboard=None, extra={}, **kwargs):
+    def _query(self, fields=[], whiteboard=None, extra={},
+            default_component=True, **kwargs):
         '''Search Bugzilla.  kwargs are passed to build_query().  Arguments
         not supported by build_query can be passed in extra and will be
-        applied to the query dict afterward.'''
+        applied to the query dict afterward.  Limit to configured product/
+        component unless default_component is False.'''
 
+        if default_component:
+            kwargs.update({
+                'product': self._config.bugzilla_product,
+                'component': self._config.bugzilla_component,
+            })
         query = self._bzapi.build_query(
-            product=self._config.bugzilla_product,
-            component=self._config.bugzilla_component,
             include_fields=fields + self.DEFAULT_FIELDS,
             **kwargs
         )
@@ -529,9 +534,12 @@ class CommandHandler(metaclass=Registry):
                 except KeyError:
                     # nothing for this release
                     continue
-                # Find bugs attached to this bootimage bump
+                # Find bugs attached to this bootimage bump.  We normally
+                # refuse to create bootimage bugs outside our component, but
+                # if they've been created manually, detect them anyway so
+                # bugs don't get missed.
                 bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
-                        dependson=[bootimage.id])
+                        dependson=[bootimage.id], default_component=False)
                 report.append(self._bug_link(bootimage, label) + ':')
                 found = False
                 for bug in bugs:
