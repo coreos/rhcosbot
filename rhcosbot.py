@@ -9,7 +9,6 @@ from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import os
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 import sqlite3
@@ -176,13 +175,13 @@ def report_errors(f):
             # Exception type leaked from the slack_sdk API.  Assume transient
             # network problem; don't send message.
             print(e)
-        except Exception as e:
+        except Exception:
             try:
                 message = f'Caught exception:\n```\n{traceback.format_exc()}```'
                 client = WebClient(token=config.slack_token)
                 channel = client.conversations_open(users=[config.error_notification])['channel']['id']
                 client.chat_postMessage(channel=channel, text=message)
-            except Exception as e:
+            except Exception:
                 traceback.print_exc()
     return wrapper
 
