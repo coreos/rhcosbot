@@ -161,6 +161,144 @@ class Releases(OrderedDict):
         return ret
 
 
+class Bugzilla:
+    '''Wrapper class for accessing Bugzilla.'''
+
+    # Some standard BZ fields that we usually want
+    DEFAULT_FIELDS = [
+        'cf_devel_whiteboard',
+        'component',
+        'product',
+        'summary',
+        'status',
+        'target_release',
+    ]
+
+    BOOTIMAGE_WHITEBOARD = 'bootimage'
+    # Can't use hyphens or underscores, since those count as a word boundary
+    BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
+    BOOTIMAGE_BUG_READY_WHITEBOARD = 'bootimageReady'
+
+    def __init__(self, config):
+        self.api = bugzilla.Bugzilla(config.bugzilla,
+                api_key=config.bugzilla_key, force_rest=True)
+        self._config = config
+
+    def getbug(self, desc, fields=[]):
+        '''Query Bugzilla for a bug.  desc can be a bug number, or a string
+        with a bug number, or a BZ URL with optional anchor.'''
+
+        # Convert desc to integer
+        if isinstance(desc, str):
+            # Slack puts URLs inside <>.
+            try:
+                bz = int(desc.replace(self._config.bugzilla_bug_url, '', 1). \
+                        split('#')[0]. \
+                        strip(' <>'))
+            except ValueError:
+                raise Fail("Invalid bug number.")
+        else:
+            bz = desc
+
+        # Query Bugzilla
+        fields = fields + self.DEFAULT_FIELDS
+        try:
+            bug = self.api.getbug(bz, include_fields=fields)
+        except IndexError:
+            raise Fail(f"Couldn't find bug {bz}.")
+
+        # Basic validation that it's safe to operate on this bug
+        if bug.product != self._config.bugzilla_product:
+            raise Fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
+        if bug.component != self._config.bugzilla_component:
+            raise Fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
+
+        return bug
+
+    def query(self, fields=[], whiteboard=None, extra={},
+            default_component=True, **kwargs):
+        '''Search Bugzilla.  kwargs are passed to build_query().  Arguments
+        not supported by build_query can be passed in extra and will be
+        applied to the query dict afterward.  Limit to configured product/
+        component unless default_component is False.'''
+
+        if default_component:
+            kwargs.update({
+                'product': self._config.bugzilla_product,
+                'component': self._config.bugzilla_component,
+            })
+        query = self.api.build_query(
+            include_fields=fields + self.DEFAULT_FIELDS,
+            **kwargs
+        )
+        query.update(extra)
+        if whiteboard is not None:
+            query.update({
+                'f1': 'cf_devel_whiteboard',
+                'o1': 'allwords',
+                'v1': whiteboard,
+            })
+        return sorted(self.api.query(query), key=lambda b: b.id)
+
+    def get_backports(self, bug, fields=[], min_ver=None):
+        '''Follow the backport bug chain from the specified Bug, until we
+        reach min_ver or run out of bugs or configured releases.  Return a
+        list of Bugs from newest to oldest release, including the specified
+        Bugzilla fields.  Fail if the specified BZ doesn't match the
+        configured current release.'''
+
+        # Check bug invariants
+        bug_target = bug.target_release[0]
+        if not self._config.releases.current.has_target(bug_target):
+            raise Fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
+
+        # Walk each backport version
+        cur_bug = bug
+        ret = []
+        for rel in self._config.releases.at_least(min_ver).previous.values():
+            # Check for an existing clone with this target release or
+            # one of its aliases
+            candidates = self.query(fields=fields, extra={
+                'cf_clone_of': cur_bug.id,
+            })
+            candidates = [
+                b for b in candidates
+                if rel.has_target(b.target_release[0])
+            ]
+            if len(candidates) > 1:
+                bzlist = ', '.join(str(b.id) for b in candidates)
+                raise Fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
+            if len(candidates) == 0:
+                break
+            cur_bug = candidates[0]
+            ret.append(cur_bug)
+        return ret
+
+    def get_bootimages(self, status='ASSIGNED', fields=[]):
+        '''Get a map from release label to bootimage bump bug with the
+        specified status.  Fail if any release has multiple bootimage bumps
+        with that status.  Include the specified bug fields.'''
+
+        bugs = self.query(fields=fields, status=status,
+                whiteboard=self.BOOTIMAGE_WHITEBOARD)
+        ret = {}
+        for bug in bugs:
+            try:
+                rel = self._config.releases.by_target[bug.target_release[0]]
+            except KeyError:
+                # unknown target release; ignore
+                continue
+            if rel.label in ret:
+                raise Fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
+            ret[rel.label] = bug
+        return ret
+
+    @staticmethod
+    def whiteboard(bug):
+        '''Return the words in the dev whiteboard for the specified Bug.'''
+        return bug.cf_devel_whiteboard.split()
+
+
 def report_errors(f):
     '''Decorator that sends exceptions to an administrator via Slack DM
     and then swallows them.  The first argument of the function must be
@@ -228,27 +366,11 @@ class CommandHandler(metaclass=Registry):
     '''Wrapper class to handle a single event in a thread.  Creates its own
     network clients for thread safety.'''
 
-    BOOTIMAGE_WHITEBOARD = 'bootimage'
-    # Can't use hyphens or underscores, since those count as a word boundary
-    BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
-    BOOTIMAGE_BUG_READY_WHITEBOARD = 'bootimageReady'
-
-    # Some standard BZ fields that we usually want
-    DEFAULT_FIELDS = [
-        'cf_devel_whiteboard',
-        'component',
-        'product',
-        'summary',
-        'status',
-        'target_release',
-    ]
-
     def __init__(self, config, event):
         self._config = config
         self._event = event
         self._client = WebClient(token=config.slack_token)
-        self._bzapi = bugzilla.Bugzilla(config.bugzilla,
-                api_key=config.bugzilla_key, force_rest=True)
+        self._bz = Bugzilla(config)
         self._called = False
 
     def __call__(self):
@@ -317,115 +439,6 @@ class CommandHandler(metaclass=Registry):
                 # disable Shodan link unfurls
                 unfurl_links=False, unfurl_media=False)
 
-    def _getbug(self, desc, fields=[]):
-        '''Query Bugzilla for a bug.  desc can be a bug number, or a string
-        with a bug number, or a BZ URL with optional anchor.'''
-
-        # Convert desc to integer
-        if isinstance(desc, str):
-            # Slack puts URLs inside <>.
-            try:
-                bz = int(desc.replace(self._config.bugzilla_bug_url, '', 1). \
-                        split('#')[0]. \
-                        strip(' <>'))
-            except ValueError:
-                raise Fail("Invalid bug number.")
-        else:
-            bz = desc
-
-        # Query Bugzilla
-        fields = fields + self.DEFAULT_FIELDS
-        try:
-            bug = self._bzapi.getbug(bz, include_fields=fields)
-        except IndexError:
-            raise Fail(f"Couldn't find bug {bz}.")
-
-        # Basic validation that it's safe to operate on this bug
-        if bug.product != self._config.bugzilla_product:
-            raise Fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
-        if bug.component != self._config.bugzilla_component:
-            raise Fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
-
-        return bug
-
-    def _query(self, fields=[], whiteboard=None, extra={},
-            default_component=True, **kwargs):
-        '''Search Bugzilla.  kwargs are passed to build_query().  Arguments
-        not supported by build_query can be passed in extra and will be
-        applied to the query dict afterward.  Limit to configured product/
-        component unless default_component is False.'''
-
-        if default_component:
-            kwargs.update({
-                'product': self._config.bugzilla_product,
-                'component': self._config.bugzilla_component,
-            })
-        query = self._bzapi.build_query(
-            include_fields=fields + self.DEFAULT_FIELDS,
-            **kwargs
-        )
-        query.update(extra)
-        if whiteboard is not None:
-            query.update({
-                'f1': 'cf_devel_whiteboard',
-                'o1': 'allwords',
-                'v1': whiteboard,
-            })
-        return sorted(self._bzapi.query(query), key=lambda b: b.id)
-
-    def _get_backports(self, bug, fields=[], min_ver=None):
-        '''Follow the backport bug chain from the specified Bug, until we
-        reach min_ver or run out of bugs or configured releases.  Return a
-        list of Bugs from newest to oldest release, including the specified
-        Bugzilla fields.  Fail if the specified BZ doesn't match the
-        configured current release.'''
-
-        # Check bug invariants
-        bug_target = bug.target_release[0]
-        if not self._config.releases.current.has_target(bug_target):
-            raise Fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
-
-        # Walk each backport version
-        cur_bug = bug
-        ret = []
-        for rel in self._config.releases.at_least(min_ver).previous.values():
-            # Check for an existing clone with this target release or
-            # one of its aliases
-            candidates = self._query(fields=fields, extra={
-                'cf_clone_of': cur_bug.id,
-            })
-            candidates = [
-                b for b in candidates
-                if rel.has_target(b.target_release[0])
-            ]
-            if len(candidates) > 1:
-                bzlist = ', '.join(str(b.id) for b in candidates)
-                raise Fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
-            if len(candidates) == 0:
-                break
-            cur_bug = candidates[0]
-            ret.append(cur_bug)
-        return ret
-
-    def _get_bootimages(self, status='ASSIGNED', fields=[]):
-        '''Get a map from release label to bootimage bump bug with the
-        specified status.  Fail if any release has multiple bootimage bumps
-        with that status.  Include the specified bug fields.'''
-
-        bugs = self._query(fields=fields, status=status,
-                whiteboard=self.BOOTIMAGE_WHITEBOARD)
-        ret = {}
-        for bug in bugs:
-            try:
-                rel = self._config.releases.by_target[bug.target_release[0]]
-            except KeyError:
-                # unknown target release; ignore
-                continue
-            if rel.label in ret:
-                raise Fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
-            ret[rel.label] = bug
-        return ret
-
     def _bug_link(self, bug, text=None):
         '''Format a Bug into a Slack link.'''
         text = str(text) if text else bug.summary
@@ -433,17 +446,12 @@ class CommandHandler(metaclass=Registry):
         if bug.status in ('NEW', 'ASSIGNED'):
             return f'*{link}*'
         if bug.status == 'POST':
-            if self.BOOTIMAGE_BUG_READY_WHITEBOARD in self._whiteboard(bug):
+            if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD in self._bz.whiteboard(bug):
                 return f'_{link}_'
             return link
         if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
             return f'~{link}~'
         return f'¿{link}?'
-
-    @staticmethod
-    def _whiteboard(bug):
-        '''Return the words in the dev whiteboard for the specified Bug.'''
-        return bug.cf_devel_whiteboard.split()
 
     @register(('backport',), ('bz-url-or-id', 'minimum-release'),
             doc='ensure there are backport bugs down to minimum-release')
@@ -457,7 +465,7 @@ class CommandHandler(metaclass=Registry):
             raise Fail(f"{escape(min_ver)} is the current release; can't backport.")
 
         # Look up the bug.  This validates the product and component.
-        bug = self._getbug(desc, [
+        bug = self._bz.getbug(desc, [
             'assigned_to',
             'groups',
             'severity',
@@ -468,12 +476,12 @@ class CommandHandler(metaclass=Registry):
             raise Fail("Bug severity is not set; can't backport.")
 
         # Query existing backport bugs
-        backports = self._get_backports(bug, min_ver=min_ver)
+        backports = self._bz.get_backports(bug, min_ver=min_ver)
 
         # Query bootimages if needed
-        need_bootimage = self.BOOTIMAGE_BUG_WHITEBOARD in self._whiteboard(bug)
+        need_bootimage = self._bz.BOOTIMAGE_BUG_WHITEBOARD in self._bz.whiteboard(bug)
         if need_bootimage:
-            bootimages = self._get_bootimages()
+            bootimages = self._bz.get_bootimages()
 
         # First, do checks
         for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
@@ -494,7 +502,7 @@ class CommandHandler(metaclass=Registry):
                 depends = [cur_bug.id]
                 if need_bootimage:
                     depends.append(bootimages[rel.label].id)
-                info = self._bzapi.build_createbug(
+                info = self._bz.api.build_createbug(
                     product=bug.product,
                     component=bug.component,
                     version=bug.version,
@@ -509,9 +517,9 @@ class CommandHandler(metaclass=Registry):
                 )
                 info['cf_clone_of'] = cur_bug.id
                 if need_bootimage:
-                    info['cf_devel_whiteboard'] = self.BOOTIMAGE_BUG_WHITEBOARD
-                bz = self._bzapi.createbug(info).id
-                cur_bug = self._getbug(bz)
+                    info['cf_devel_whiteboard'] = self._bz.BOOTIMAGE_BUG_WHITEBOARD
+                bz = self._bz.api.createbug(info).id
+                cur_bug = self._bz.getbug(bz)
                 created_bugs.append(self._bug_link(cur_bug, rel.label))
             all_bugs.append(self._bug_link(cur_bug, rel.label))
 
@@ -533,7 +541,7 @@ class CommandHandler(metaclass=Registry):
         )
         report = []
         for caption, status in sections:
-            bootimages = self._get_bootimages(status=status)
+            bootimages = self._bz.get_bootimages(status=status)
             if not bootimages:
                 continue
             report.append(f'\n*_{caption}_*:')
@@ -547,7 +555,7 @@ class CommandHandler(metaclass=Registry):
                 # refuse to create bootimage bugs outside our component, but
                 # if they've been created manually, detect them anyway so
                 # bugs don't get missed.
-                bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+                bugs = self._bz.query(whiteboard=self._bz.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id], default_component=False)
                 report.append('\n*For* ' + self._bug_link(bootimage, label) + ':')
                 found = False
@@ -564,20 +572,20 @@ class CommandHandler(metaclass=Registry):
     def _bootimage_bug_add(self, desc):
         '''Add a bug and its backports to planned bootimage bumps.'''
         # Look up the bug.  This validates the product and component.
-        bug = self._getbug(desc)
+        bug = self._bz.getbug(desc)
 
         # Get planned bootimage bumps
-        bootimages = self._get_bootimages()
+        bootimages = self._bz.get_bootimages()
 
         # Get bug and its backports
-        bugs = [bug] + self._get_backports(bug)
+        bugs = [bug] + self._bz.get_backports(bug)
 
         # First, do checks
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             assert rel.has_target(cur_bug.target_release[0])
             if rel.label not in bootimages:
                 raise Fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
-            if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(cur_bug):
+            if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
                 if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
                     raise Fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
 
@@ -587,13 +595,13 @@ class CommandHandler(metaclass=Registry):
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             link = self._bug_link(cur_bug, rel.label)
             all_bugs.append(link)
-            if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(cur_bug):
+            if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
                 bootimage = bootimages[rel.label]
-                update = self._bzapi.build_update(
+                update = self._bz.api.build_update(
                     depends_on_add=[bootimage.id],
                 )
-                update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_WHITEBOARD}'
-                self._bzapi.update_bugs([cur_bug.id], update)
+                update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_WHITEBOARD}'
+                self._bz.api.update_bugs([cur_bug.id], update)
                 added_bugs.append(link)
 
         # Show report
@@ -610,19 +618,19 @@ class CommandHandler(metaclass=Registry):
     def _bootimage_bug_ready(self, desc):
         '''Mark a bug ready for its bootimage bump.'''
         # Look up the bug.  This validates the product and component.
-        bug = self._getbug(desc)
+        bug = self._bz.getbug(desc)
 
-        if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(bug):
+        if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(bug):
             raise Fail(f'Bug {bug.id} is not attached to a bootimage bump.')
         if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
             raise Fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
-        if self.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._whiteboard(bug):
-            update = self._bzapi.build_update(
+        if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._bz.whiteboard(bug):
+            update = self._bz.api.build_update(
                 status='POST',
                 comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
             )
-            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_READY_WHITEBOARD}'
-            self._bzapi.update_bugs([bug.id], update)
+            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD}'
+            self._bz.api.update_bugs([bug.id], update)
 
     @register(('bootimage', 'bug', 'list'),
             doc='list bugs on upcoming bootimage bumps')
@@ -633,7 +641,7 @@ class CommandHandler(metaclass=Registry):
         )
         report = []
         for caption, status in sections:
-            bootimages = self._get_bootimages(status=status)
+            bootimages = self._bz.get_bootimages(status=status)
             progenitors = {} # progenitor bug ID -> Bug
             groups = {} # progenitor bug ID -> [bug links]
             canonical = {} # backport bug ID -> progenitor bug ID
@@ -647,7 +655,7 @@ class CommandHandler(metaclass=Registry):
                 # refuse to create bootimage bugs outside our component, but
                 # if they've been created manually, detect them anyway so
                 # bugs don't get missed.
-                bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+                bugs = self._bz.query(whiteboard=self._bz.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id], default_component=False,
                         fields=['cf_clone_of'])
                 for bug in bugs:
@@ -683,7 +691,7 @@ class CommandHandler(metaclass=Registry):
     def _ping(self):
         # Check Bugzilla connectivity
         try:
-            if not self._bzapi.logged_in:
+            if not self._bz.api.logged_in:
                 raise Exception('Not logged in.')
         except Exception:
             # Swallow exception details and just report the failure
@@ -762,9 +770,8 @@ def main():
     client = WebClient(token=config.slack_token)
     # store our user ID
     config.bot_id = client.auth_test()['user_id']
-    bzapi = bugzilla.Bugzilla(config.bugzilla, api_key=config.bugzilla_key,
-            force_rest=True)
-    if not bzapi.logged_in:
+    bz = Bugzilla(config)
+    if not bz.api.logged_in:
         raise Exception('Did not authenticate')
     db = Database(config)
 
