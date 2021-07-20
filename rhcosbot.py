@@ -201,7 +201,7 @@ class Registry(type):
         cls = super().__new__(cls, name, bases, attrs)
         registry = {}
         for f in attrs.values():
-            command = getattr(f, '_command', None)
+            command = getattr(f, 'command', None)
             if command is not None:
                 registry[command] = f
         cls._registry = registry
@@ -211,9 +211,9 @@ class Registry(type):
 def register(*args, fast=False, complete=True):
     '''Decorator that registers the subcommand handled by a function.'''
     def decorator(f):
-        f._command = tuple(args)
-        f._fast = fast
-        f._complete = complete
+        f.command = tuple(args)
+        f.fast = fast
+        f.complete = complete
         return f
     return decorator
 
@@ -257,7 +257,7 @@ class CommandHandler(metaclass=Registry):
             if f is not None:
                 @report_errors
                 def wrapper(_config):
-                    if not f._fast:
+                    if not f.fast:
                         self._react('hourglass_flowing_sand')
                     try:
                         f(self, *words[count:])
@@ -268,13 +268,13 @@ class CommandHandler(metaclass=Registry):
                         self._react('boom')
                         raise
                     finally:
-                        if not f._fast:
+                        if not f.fast:
                             self._client.reactions_remove(
                                 channel=self._event.channel,
                                 timestamp=self._event.ts,
                                 name='hourglass_flowing_sand'
                             )
-                    if f._complete:
+                    if f.complete:
                         self._react('ballot_box_with_check')
                 # report_errors() requires the config to be the first argument
                 threading.Thread(target=wrapper, name=f.__name__,
