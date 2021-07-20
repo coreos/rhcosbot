@@ -712,7 +712,7 @@ class CommandHandler(metaclass=Registry):
         self._reply(HELP.replace('%commands%', '\n'.join(commands)),
                 at_user=False)
 
-    @register('throw', fast=True, complete=False)
+    @register(('throw',), fast=True, complete=False)
     def _throw(self):
         # undocumented
         raise Exception(f'Throwing exception as requested by <@{self._event.user}>')
