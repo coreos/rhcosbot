@@ -293,6 +293,23 @@ class Bugzilla:
             ret[rel.label] = bug
         return ret
 
+    def get_bootimage_bugs(self, bootimage, release, fields=[], **kwargs):
+        '''Find bugs attached to the specified bootimage bump and release,
+        which must match.  We normally refuse to create bootimage bugs
+        outside our component, but if they've been created manually, detect
+        them anyway so bugs don't get missed.'''
+        bugs = self.query(
+            dependson=[bootimage.id],
+            fields=fields,
+            whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+            default_component=False,
+            **kwargs
+        )
+        return [
+            bug for bug in bugs
+            if release.has_target(bug.target_release[0])
+        ]
+
     @staticmethod
     def whiteboard(bug):
         '''Return the words in the dev whiteboard for the specified Bug.'''
@@ -551,19 +568,11 @@ class CommandHandler(metaclass=Registry):
                 except KeyError:
                     # nothing for this release
                     continue
-                # Find bugs attached to this bootimage bump.  We normally
-                # refuse to create bootimage bugs outside our component, but
-                # if they've been created manually, detect them anyway so
-                # bugs don't get missed.
-                bugs = self._bz.query(whiteboard=self._bz.BOOTIMAGE_BUG_WHITEBOARD,
-                        dependson=[bootimage.id], default_component=False)
+                bugs = self._bz.get_bootimage_bugs(bootimage, rel)
                 report.append('\n*For* ' + self._bug_link(bootimage, label) + ':')
-                found = False
                 for bug in bugs:
-                    if rel.has_target(bug.target_release[0]):
-                        report.append('• ' + self._bug_link(bug))
-                        found = True
-                if not found:
+                    report.append('• ' + self._bug_link(bug))
+                if not bugs:
                     report.append('_no bugs_')
         self._reply('\n'.join(report), at_user=False)
 
@@ -651,26 +660,20 @@ class CommandHandler(metaclass=Registry):
                 except KeyError:
                     # nothing for this release
                     continue
-                # Find bugs attached to this bootimage bump.  We normally
-                # refuse to create bootimage bugs outside our component, but
-                # if they've been created manually, detect them anyway so
-                # bugs don't get missed.
-                bugs = self._bz.query(whiteboard=self._bz.BOOTIMAGE_BUG_WHITEBOARD,
-                        dependson=[bootimage.id], default_component=False,
+                bugs = self._bz.get_bootimage_bugs(bootimage, rel,
                         fields=['cf_clone_of'])
                 for bug in bugs:
-                    if rel.has_target(bug.target_release[0]):
-                        # Find the progenitor from this bug's parent.  Maybe
-                        # there is none, and we're the progenitor.
-                        progenitor = canonical.get(bug.cf_clone_of, bug.id)
-                        # Add the next link in the ancestry chain
-                        canonical[bug.id] = progenitor
-                        # If we're the progenitor, record bug details
-                        progenitors.setdefault(progenitor, bug)
-                        # Associate this bug's link with the progenitor
-                        groups.setdefault(progenitor, []).append(
-                            self._bug_link(bug, rel.label)
-                        )
+                    # Find the progenitor from this bug's parent.  Maybe
+                    # there is none, and we're the progenitor.
+                    progenitor = canonical.get(bug.cf_clone_of, bug.id)
+                    # Add the next link in the ancestry chain
+                    canonical[bug.id] = progenitor
+                    # If we're the progenitor, record bug details
+                    progenitors.setdefault(progenitor, bug)
+                    # Associate this bug's link with the progenitor
+                    groups.setdefault(progenitor, []).append(
+                        self._bug_link(bug, rel.label)
+                    )
             if progenitors:
                 report.append(f'\n*_{caption}_*:')
                 for bz, bug in sorted(progenitors.items()):
