@@ -22,6 +22,8 @@ bugzilla-product: OpenShift Container Platform
 bugzilla-component: RHCOS
 # Default assignee for bootimage bugs
 bugzilla-assignee: bovik@example.com
+# Bugzilla polling interval in seconds
+bugzilla-poll-interval: 300
 
 # Possible RHCOS target releases, newest first
 releases:

@@ -743,6 +743,34 @@ def process_event(config, socket_client, req):
         CommandHandler(config, payload.event)()
 
 
+@report_errors
+def periodic(config, db, bz):
+    '''Run periodic tasks.'''
+
+    # Prune database
+    with db:
+        db.prune_events()
+
+    # Find bugs in state MODIFIED or later which are attached to bootimage
+    # bumps in POST or earlier, and move the bugs back to POST.
+    for status in ('ASSIGNED', 'POST'):
+        bootimages = bz.get_bootimages(status=status)
+        for label, rel in config.releases.items():
+            try:
+                bootimage = bootimages[label]
+            except KeyError:
+                continue
+            bugs = bz.get_bootimage_bugs(bootimage, rel,
+                    status=['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'])
+            if not bugs:
+                continue
+            update = bz.api.build_update(
+                status='POST',
+                comment=f'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage.id}, which is in state {bootimage.status}.  Moving this bug back to POST.',
+            )
+            bz.api.update_bugs([b.id for b in bugs], update)
+
+
 def main():
     parser = argparse.ArgumentParser(
             description='Bugzilla helper bot for Slack.')
@@ -783,11 +811,10 @@ def main():
             lambda socket_client, req: process_event(config, socket_client, req))
     socket_client.connect()
 
-    # Clean up database every hour
+    # Run periodic tasks
     while True:
-        with db:
-            db.prune_events()
-        time.sleep(3600)
+        periodic(config, db, bz)
+        time.sleep(config.bugzilla_poll_interval)
 
 
 if __name__ == '__main__':
