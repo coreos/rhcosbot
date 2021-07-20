@@ -530,7 +530,7 @@ class CommandHandler(metaclass=Registry):
             if not bootimages:
                 continue
             report.append(f'\n*_{caption}_*:')
-            for label, rel in reversed(self._config.releases.items()):
+            for label, rel in self._config.releases.items():
                 try:
                     bootimage = bootimages[label]
                 except KeyError:
