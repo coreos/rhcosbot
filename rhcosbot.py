@@ -617,6 +617,51 @@ class CommandHandler(metaclass=Registry):
             update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_READY_WHITEBOARD}'
             self._bzapi.update_bugs([bug.id], update)
 
+    @register(('bootimage', 'bug', 'list'),
+            doc='list bugs on upcoming bootimage bumps')
+    def _bootimage_bug_list(self):
+        sections = (
+            ('Planned bootimage bumps', 'ASSIGNED'),
+            ('Pending bootimage bumps', 'POST'),
+        )
+        report = []
+        for caption, status in sections:
+            bootimages = self._get_bootimages(status=status)
+            progenitors = {} # progenitor bug ID -> Bug
+            groups = {} # progenitor bug ID -> [bug links]
+            canonical = {} # backport bug ID -> progenitor bug ID
+            for label, rel in self._config.releases.items():
+                try:
+                    bootimage = bootimages[label]
+                except KeyError:
+                    # nothing for this release
+                    continue
+                # Find bugs attached to this bootimage bump.  We normally
+                # refuse to create bootimage bugs outside our component, but
+                # if they've been created manually, detect them anyway so
+                # bugs don't get missed.
+                bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+                        dependson=[bootimage.id], default_component=False,
+                        fields=['cf_clone_of'])
+                for bug in bugs:
+                    if rel.has_target(bug.target_release[0]):
+                        # Find the progenitor from this bug's parent.  Maybe
+                        # there is none, and we're the progenitor.
+                        progenitor = canonical.get(bug.cf_clone_of, bug.id)
+                        # Add the next link in the ancestry chain
+                        canonical[bug.id] = progenitor
+                        # If we're the progenitor, record bug details
+                        progenitors.setdefault(progenitor, bug)
+                        # Associate this bug's link with the progenitor
+                        groups.setdefault(progenitor, []).append(
+                            self._bug_link(bug, rel.label)
+                        )
+            if progenitors:
+                report.append(f'\n*_{caption}_*:')
+                for bz, bug in sorted(progenitors.items()):
+                    report.append(f'• {escape(bug.summary)} [{", ".join(groups[bz])}]')
+        self._reply('\n'.join(report), at_user=False)
+
     @register(('release', 'list'), doc='list known releases',
             fast=True, complete=False)
     def _release_list(self):
