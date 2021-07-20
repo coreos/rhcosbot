@@ -64,7 +64,7 @@ class Database:
 
     def __exit__(self, exc_type, exc_value, tb):
         '''Commit a database transaction.'''
-        if exc_type is HandledError:
+        if exc_type in (HandledError, Fail):
             # propagate exception but commit anyway
             self._db.__exit__(None, None, None)
             return False
@@ -86,6 +86,11 @@ class Database:
 
 class HandledError(Exception):
     '''An exception which should just be swallowed.'''
+    pass
+
+
+class Fail(Exception):
+    '''An exception with a message that should be displayed to the user.'''
     pass
 
 
@@ -163,8 +168,18 @@ def report_errors(f):
     import json, requests, socket, urllib.error
     @wraps(f)
     def wrapper(config, *args, **kwargs):
+        def send(message):
+            try:
+                client = WebClient(token=config.slack_token)
+                channel = client.conversations_open(users=[config.error_notification])['channel']['id']
+                client.chat_postMessage(channel=channel, text=message)
+            except Exception:
+                traceback.print_exc()
         try:
             return f(config, *args, **kwargs)
+        except Fail as e:
+            # Nothing else caught this; just report the error string.
+            send(str(e))
         except HandledError:
             pass
         except (json.JSONDecodeError, requests.ConnectionError, requests.HTTPError, requests.ReadTimeout) as e:
@@ -176,13 +191,7 @@ def report_errors(f):
             # network problem; don't send message.
             print(e)
         except Exception:
-            try:
-                message = f'Caught exception:\n```\n{traceback.format_exc()}```'
-                client = WebClient(token=config.slack_token)
-                channel = client.conversations_open(users=[config.error_notification])['channel']['id']
-                client.chat_postMessage(channel=channel, text=message)
-            except Exception:
-                traceback.print_exc()
+            send(f'Caught exception:\n```\n{traceback.format_exc()}```')
     return wrapper
 
 
@@ -261,13 +270,16 @@ class CommandHandler(metaclass=Registry):
                         if len(args) != len(f.args):
                             if f.args:
                                 argdesc = ' '.join(f'<{a}>' for a in f.args)
-                                self._fail(f'Bad arguments; expect `{argdesc}`.')
+                                raise Fail(f'Bad arguments; expect `{argdesc}`.')
                             else:
-                                self._fail('This command takes no arguments.')
+                                raise Fail('This command takes no arguments.')
                         f(self, *args)
-                    except HandledError:
+                    except Fail as e:
                         self._react('x')
-                        raise
+                        self._reply(str(e))
+                        # convert to HandledError to indicate that we've
+                        # displayed this message
+                        raise HandledError()
                     except Exception:
                         self._react('boom')
                         raise
@@ -305,10 +317,6 @@ class CommandHandler(metaclass=Registry):
                 # disable Shodan link unfurls
                 unfurl_links=False, unfurl_media=False)
 
-    def _fail(self, message):
-        self._reply(message)
-        raise HandledError()
-
     def _getbug(self, desc, fields=[]):
         '''Query Bugzilla for a bug.  desc can be a bug number, or a string
         with a bug number, or a BZ URL with optional anchor.'''
@@ -321,7 +329,7 @@ class CommandHandler(metaclass=Registry):
                         split('#')[0]. \
                         strip(' <>'))
             except ValueError:
-                self._fail("Invalid bug number.")
+                raise Fail("Invalid bug number.")
         else:
             bz = desc
 
@@ -330,13 +338,13 @@ class CommandHandler(metaclass=Registry):
         try:
             bug = self._bzapi.getbug(bz, include_fields=fields)
         except IndexError:
-            self._fail(f"Couldn't find bug {bz}.")
+            raise Fail(f"Couldn't find bug {bz}.")
 
         # Basic validation that it's safe to operate on this bug
         if bug.product != self._config.bugzilla_product:
-            self._fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
+            raise Fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
         if bug.component != self._config.bugzilla_component:
-            self._fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
+            raise Fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
 
         return bug
 
@@ -375,7 +383,7 @@ class CommandHandler(metaclass=Registry):
         # Check bug invariants
         bug_target = bug.target_release[0]
         if not self._config.releases.current.has_target(bug_target):
-            self._fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
+            raise Fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
 
         # Walk each backport version
         cur_bug = bug
@@ -392,7 +400,7 @@ class CommandHandler(metaclass=Registry):
             ]
             if len(candidates) > 1:
                 bzlist = ', '.join(str(b.id) for b in candidates)
-                self._fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
+                raise Fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
             if len(candidates) == 0:
                 break
             cur_bug = candidates[0]
@@ -414,7 +422,7 @@ class CommandHandler(metaclass=Registry):
                 # unknown target release; ignore
                 continue
             if rel.label in ret:
-                self._fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
+                raise Fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
             ret[rel.label] = bug
         return ret
 
@@ -444,9 +452,9 @@ class CommandHandler(metaclass=Registry):
         in all releases >= the specified one.'''
         # Fail if release is invalid or current
         if min_ver not in self._config.releases:
-            self._fail(f'Unknown release "{escape(min_ver)}".')
+            raise Fail(f'Unknown release "{escape(min_ver)}".')
         if min_ver == self._config.releases.current.label:
-            self._fail(f"{escape(min_ver)} is the current release; can't backport.")
+            raise Fail(f"{escape(min_ver)} is the current release; can't backport.")
 
         # Look up the bug.  This validates the product and component.
         bug = self._getbug(desc, [
@@ -457,7 +465,7 @@ class CommandHandler(metaclass=Registry):
         ])
         if bug.severity == 'unspecified':
             # Eric-Paris-bot will unset the target version without a severity
-            self._fail("Bug severity is not set; can't backport.")
+            raise Fail("Bug severity is not set; can't backport.")
 
         # Query existing backport bugs
         backports = self._get_backports(bug, min_ver=min_ver)
@@ -471,7 +479,7 @@ class CommandHandler(metaclass=Registry):
         for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
             if need_bootimage:
                 if rel.label not in bootimages:
-                    self._fail(f"Couldn't find bootimage for {rel.label}.")
+                    raise Fail(f"Couldn't find bootimage for {rel.label}.")
 
         # Walk each backport version
         cur_bug = bug
@@ -568,10 +576,10 @@ class CommandHandler(metaclass=Registry):
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             assert rel.has_target(cur_bug.target_release[0])
             if rel.label not in bootimages:
-                self._fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
+                raise Fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
             if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(cur_bug):
                 if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
-                    self._fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
+                    raise Fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
 
         # Add to bootimage bumps; generate report
         added_bugs = []
@@ -605,9 +613,9 @@ class CommandHandler(metaclass=Registry):
         bug = self._getbug(desc)
 
         if self.BOOTIMAGE_BUG_WHITEBOARD not in self._whiteboard(bug):
-            self._fail(f'Bug {bug.id} is not attached to a bootimage bump.')
+            raise Fail(f'Bug {bug.id} is not attached to a bootimage bump.')
         if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
-            self._fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
+            raise Fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
         if self.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._whiteboard(bug):
             update = self._bzapi.build_update(
                 status='POST',
@@ -679,7 +687,7 @@ class CommandHandler(metaclass=Registry):
                 raise Exception('Not logged in.')
         except Exception:
             # Swallow exception details and just report the failure
-            self._fail('Cannot contact Bugzilla.')
+            raise Fail('Cannot contact Bugzilla.')
 
     @register(('help',), doc='print this message', fast=True, complete=False)
     def _help(self):
