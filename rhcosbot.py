@@ -105,8 +105,9 @@ class Release:
     def __repr__(self):
         return f'<{self.__class__.__name__} {self.label}>'
 
-    def has_target(self, target):
-        return target == self.target or target in self.aliases
+    @property
+    def targets(self):
+        return [self.target] + self.aliases
 
 
 class Releases(OrderedDict):
@@ -249,7 +250,7 @@ class Bugzilla:
 
         # Check bug invariants
         bug_target = bug.target_release[0]
-        if not self._config.releases.current.has_target(bug_target):
+        if bug_target not in self._config.releases.current.targets:
             raise Fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
 
         # Walk each backport version
@@ -258,13 +259,13 @@ class Bugzilla:
         for rel in self._config.releases.at_least(min_ver).previous.values():
             # Check for an existing clone with this target release or
             # one of its aliases
-            candidates = self.query(fields=fields, extra={
-                'cf_clone_of': cur_bug.id,
-            })
-            candidates = [
-                b for b in candidates
-                if rel.has_target(b.target_release[0])
-            ]
+            candidates = self.query(
+                target_release=rel.targets,
+                fields=fields,
+                extra={
+                    'cf_clone_of': cur_bug.id,
+                },
+            )
             if len(candidates) > 1:
                 bzlist = ', '.join(str(b.id) for b in candidates)
                 raise Fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
@@ -298,17 +299,14 @@ class Bugzilla:
         which must match.  We normally refuse to create bootimage bugs
         outside our component, but if they've been created manually, detect
         them anyway so bugs don't get missed.'''
-        bugs = self.query(
+        return self.query(
             dependson=[bootimage.id],
+            target_release=release.targets,
             fields=fields,
             whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
             default_component=False,
             **kwargs
         )
-        return [
-            bug for bug in bugs
-            if release.has_target(bug.target_release[0])
-        ]
 
     @staticmethod
     def whiteboard(bug):
@@ -591,7 +589,7 @@ class CommandHandler(metaclass=Registry):
 
         # First, do checks
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
-            assert rel.has_target(cur_bug.target_release[0])
+            assert cur_bug.target_release[0] in rel.targets
             if rel.label not in bootimages:
                 raise Fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
             if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
