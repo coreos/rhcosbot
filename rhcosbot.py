@@ -203,10 +203,10 @@ class Registry(type):
         return cls
 
 
-def register(*command, args=(), doc=None, fast=False, complete=True):
+def register(command, args=(), doc=None, fast=False, complete=True):
     '''Decorator that registers the subcommand handled by a function.'''
     def decorator(f):
-        f.command = tuple(command)
+        f.command = command
         f.args = args
         f.doc = doc
         f.doc_order = time.time()  # hack alert!
@@ -431,7 +431,7 @@ class CommandHandler(metaclass=Registry):
         '''Return the words in the dev whiteboard for the specified Bug.'''
         return bug.cf_devel_whiteboard.split()
 
-    @register('backport', args=('bz-url-or-id', 'minimum-release'),
+    @register(('backport',), ('bz-url-or-id', 'minimum-release'),
             doc='ensure there are backport bugs down to minimum-release')
     def _backport(self, *args):
         '''Ensure the existence of backport bugs for the specified BZ,
@@ -515,7 +515,7 @@ class CommandHandler(metaclass=Registry):
         message += f'All backports: {", ".join(all_bugs)}'
         self._reply(message, at_user=False)
 
-    @register('bootimage', 'list', doc='list upcoming bootimage bumps')
+    @register(('bootimage', 'list'), doc='list upcoming bootimage bumps')
     def _bootimage_list(self, *args):
         '''List bootimage bump BZs.'''
 
@@ -551,7 +551,7 @@ class CommandHandler(metaclass=Registry):
                     report.append('_no bugs_')
         self._reply('\n'.join(report), at_user=False)
 
-    @register('bootimage', 'bug', 'add', args=('bz-url-or-id',),
+    @register(('bootimage', 'bug', 'add'), ('bz-url-or-id',),
             doc='add a bug and its backports to planned bootimage bumps')
     def _bootimage_bug_add(self, *args):
         '''Add a bug and its backports to planned bootimage bumps.'''
@@ -603,7 +603,7 @@ class CommandHandler(metaclass=Registry):
         message += f'All bugs: {", ".join(all_bugs)}'
         self._reply(message, at_user=False)
 
-    @register('bootimage', 'bug', 'ready', args=('bz-url-or-id',),
+    @register(('bootimage', 'bug', 'ready'), ('bz-url-or-id',),
             doc='mark a bug landed in plashet and waiting for bootimage')
     def _bootimage_bug_ready(self, *args):
         '''Mark a bug ready for its bootimage bump.'''
@@ -628,8 +628,8 @@ class CommandHandler(metaclass=Registry):
             update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self.BOOTIMAGE_BUG_READY_WHITEBOARD}'
             self._bzapi.update_bugs([bug.id], update)
 
-    @register('release', 'list', fast=True, complete=False,
-            doc='list known releases')
+    @register(('release', 'list'), doc='list known releases',
+            fast=True, complete=False)
     def _release_list(self, *args):
         report = []
         for rel in reversed(self._config.releases.values()):
@@ -637,8 +637,8 @@ class CommandHandler(metaclass=Registry):
         body = "\n".join(report)
         self._reply(f'Release: *default-target* other-targets\n{body}\n', at_user=False)
 
-    @register('ping', fast=True,
-            doc='check whether the bot is running properly')
+    @register(('ping',), doc='check whether the bot is running properly',
+            fast=True)
     def _ping(self, *_args):
         # Check Bugzilla connectivity
         try:
@@ -648,7 +648,7 @@ class CommandHandler(metaclass=Registry):
             # Swallow exception details and just report the failure
             self._fail('Cannot contact Bugzilla.')
 
-    @register('help', fast=True, complete=False, doc='print this message')
+    @register(('help',), doc='print this message', fast=True, complete=False)
     def _help(self, *_args):
         commands = []
         for command, f in self._registry.items():
