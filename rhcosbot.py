@@ -542,7 +542,7 @@ class CommandHandler(metaclass=Registry):
                 # bugs don't get missed.
                 bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id], default_component=False)
-                report.append(self._bug_link(bootimage, label) + ':')
+                report.append('*For* ' + self._bug_link(bootimage, label) + ':')
                 found = False
                 for bug in bugs:
                     if rel.has_target(bug.target_release[0]):
