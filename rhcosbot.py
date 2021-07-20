@@ -541,7 +541,7 @@ class CommandHandler(metaclass=Registry):
                 if not found:
                     report.append('_no bugs_')
         self._client.chat_postMessage(channel=self._event.channel,
-                text='\n'.join(report))
+                text='\n'.join(report), unfurl_links=False, unfurl_media=False)
 
     @register('bootimage', 'bug', 'add')
     def _bootimage_bug_add(self, *args):
