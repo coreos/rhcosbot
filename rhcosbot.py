@@ -529,7 +529,7 @@ class CommandHandler(metaclass=Registry):
             bootimages = self._get_bootimages(status=status)
             if not bootimages:
                 continue
-            report.append(f'*_{caption}_*:')
+            report.append(f'\n*_{caption}_*:')
             for label, rel in reversed(self._config.releases.items()):
                 try:
                     bootimage = bootimages[label]
@@ -542,7 +542,7 @@ class CommandHandler(metaclass=Registry):
                 # bugs don't get missed.
                 bugs = self._query(whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
                         dependson=[bootimage.id], default_component=False)
-                report.append('*For* ' + self._bug_link(bootimage, label) + ':')
+                report.append('\n*For* ' + self._bug_link(bootimage, label) + ':')
                 found = False
                 for bug in bugs:
                     if rel.has_target(bug.target_release[0]):
