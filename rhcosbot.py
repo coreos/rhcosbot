@@ -258,7 +258,14 @@ class CommandHandler(metaclass=Registry):
                     if not f.fast:
                         self._react('hourglass_flowing_sand')
                     try:
-                        f(self, *words[count:])
+                        args = words[count:]
+                        if len(args) != len(f.args):
+                            if f.args:
+                                argdesc = ' '.join(f'<{a}>' for a in f.args)
+                                self._fail(f'Bad arguments; expect `{argdesc}`.')
+                            else:
+                                self._fail('This command takes no arguments.')
+                        f(self, *args)
                     except HandledError:
                         self._react('x')
                         raise
@@ -433,15 +440,9 @@ class CommandHandler(metaclass=Registry):
 
     @register(('backport',), ('bz-url-or-id', 'minimum-release'),
             doc='ensure there are backport bugs down to minimum-release')
-    def _backport(self, *args):
+    def _backport(self, desc, min_ver):
         '''Ensure the existence of backport bugs for the specified BZ,
         in all releases >= the specified one.'''
-        # Parse arguments
-        try:
-            desc, min_ver = args
-        except ValueError:
-            self._fail(f'Bad arguments; expect `bug minimum-release`.')
-
         # Fail if release is invalid or current
         if min_ver not in self._config.releases:
             self._fail(f'Unknown release "{escape(min_ver)}".')
@@ -516,7 +517,7 @@ class CommandHandler(metaclass=Registry):
         self._reply(message, at_user=False)
 
     @register(('bootimage', 'list'), doc='list upcoming bootimage bumps')
-    def _bootimage_list(self, *args):
+    def _bootimage_list(self):
         '''List bootimage bump BZs.'''
 
         sections = (
@@ -553,14 +554,8 @@ class CommandHandler(metaclass=Registry):
 
     @register(('bootimage', 'bug', 'add'), ('bz-url-or-id',),
             doc='add a bug and its backports to planned bootimage bumps')
-    def _bootimage_bug_add(self, *args):
+    def _bootimage_bug_add(self, desc):
         '''Add a bug and its backports to planned bootimage bumps.'''
-        # Parse arguments
-        try:
-            desc = args[0]
-        except ValueError:
-            self._fail(f'Bad arguments; expect `bug`.')
-
         # Look up the bug.  This validates the product and component.
         bug = self._getbug(desc)
 
@@ -605,14 +600,8 @@ class CommandHandler(metaclass=Registry):
 
     @register(('bootimage', 'bug', 'ready'), ('bz-url-or-id',),
             doc='mark a bug landed in plashet and waiting for bootimage')
-    def _bootimage_bug_ready(self, *args):
+    def _bootimage_bug_ready(self, desc):
         '''Mark a bug ready for its bootimage bump.'''
-        # Parse arguments
-        try:
-            desc = args[0]
-        except ValueError:
-            self._fail(f'Bad arguments; expect `bug`.')
-
         # Look up the bug.  This validates the product and component.
         bug = self._getbug(desc)
 
@@ -630,7 +619,7 @@ class CommandHandler(metaclass=Registry):
 
     @register(('release', 'list'), doc='list known releases',
             fast=True, complete=False)
-    def _release_list(self, *args):
+    def _release_list(self):
         report = []
         for rel in reversed(self._config.releases.values()):
             report.append(f'{rel.label}: *{rel.target}* {" ".join(rel.aliases)}')
@@ -639,7 +628,7 @@ class CommandHandler(metaclass=Registry):
 
     @register(('ping',), doc='check whether the bot is running properly',
             fast=True)
-    def _ping(self, *_args):
+    def _ping(self):
         # Check Bugzilla connectivity
         try:
             if not self._bzapi.logged_in:
@@ -649,7 +638,7 @@ class CommandHandler(metaclass=Registry):
             self._fail('Cannot contact Bugzilla.')
 
     @register(('help',), doc='print this message', fast=True, complete=False)
-    def _help(self, *_args):
+    def _help(self):
         commands = []
         for command, f in self._registry.items():
             if f.doc is not None:
@@ -663,7 +652,7 @@ class CommandHandler(metaclass=Registry):
                 at_user=False)
 
     @register('throw', fast=True, complete=False)
-    def _throw(self, *_args):
+    def _throw(self):
         # undocumented
         raise Exception(f'Throwing exception as requested by <@{self._event.user}>')
 
