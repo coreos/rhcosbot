@@ -297,7 +297,9 @@ class CommandHandler(metaclass=Registry):
         self._client.chat_postMessage(channel=self._event.channel,
                 text=message,
                 # start a new thread or continue the existing one
-                thread_ts=self._event.get('thread_ts', self._event.ts))
+                thread_ts=self._event.get('thread_ts', self._event.ts),
+                # disable Shodan link unfurls
+                unfurl_links=False, unfurl_media=False)
 
     def _fail(self, message):
         self._reply(message)
