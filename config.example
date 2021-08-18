@@ -29,6 +29,10 @@ bugzilla-poll-interval: 300
 # not have access to add them), but fail if we would remove all groups
 backport-allow-groups:
   - devel
+# Refuse to add bugs with these keywords to a bootimage bump
+bootimage-deny-keywords:
+  - SecurityTracking
+
 # Possible RHCOS target releases, newest first
 releases:
   # Friendly name for the release
