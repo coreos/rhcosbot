@@ -169,6 +169,7 @@ class Bugzilla:
     DEFAULT_FIELDS = [
         'cf_devel_whiteboard',
         'component',
+        'keywords',
         'product',
         'summary',
         'status',
@@ -530,6 +531,7 @@ class CommandHandler(metaclass=Registry):
                     summary=f'[{rel.label}] {bug.summary}',
                     description=f'Backport the fix for bug {bug.id} to {rel.label}.',
                     assigned_to=bug.assigned_to,
+                    keywords=bug.keywords,
                     depends_on=depends,
                     groups=groups,
                     severity=bug.severity,
