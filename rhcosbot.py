@@ -503,6 +503,12 @@ class CommandHandler(metaclass=Registry):
             if need_bootimage:
                 if rel.label not in bootimages:
                     raise Fail(f"Couldn't find bootimage for {rel.label}.")
+        groups = bug.groups
+        allow_groups = self._config.get('backport_allow_groups', [])
+        if allow_groups:
+            groups = list(set(groups) & set(allow_groups))
+        if bug.groups and not groups:
+            raise Fail("Cannot add any of the bug's groups to new clones, and refusing to create a public bug.")
 
         # Walk each backport version
         cur_bug = bug
@@ -525,7 +531,7 @@ class CommandHandler(metaclass=Registry):
                     description=f'Backport the fix for bug {bug.id} to {rel.label}.',
                     assigned_to=bug.assigned_to,
                     depends_on=depends,
-                    groups=bug.groups,
+                    groups=groups,
                     severity=bug.severity,
                     status='ASSIGNED',
                     target_release=rel.target

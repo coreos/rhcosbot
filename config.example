@@ -25,6 +25,10 @@ bugzilla-assignee: bovik@example.com
 # Bugzilla polling interval in seconds
 bugzilla-poll-interval: 300
 
+# When cloning a bug, filter out any groups other than these (because we may
+# not have access to add them), but fail if we would remove all groups
+backport-allow-groups:
+  - devel
 # Possible RHCOS target releases, newest first
 releases:
   # Friendly name for the release
