@@ -15,7 +15,7 @@ env/bin/pip install -r requirements.txt
 env/bin/python rhcosbot.py
 ```
 
-Alternatively, a [container image](https://quay.io/repository/bgilbert/rhcosbot) is available.
+Alternatively, a [container image](https://quay.io/repository/coreos/rhcosbot) is available.
 
 You'll also need to set up a Slack app in your workspace and get an API token for it, and to get a Bugzilla API key.
 
