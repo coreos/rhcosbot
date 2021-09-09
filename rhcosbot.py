@@ -17,7 +17,7 @@ import threading
 import traceback
 import yaml
 
-ISSUE_LINK = 'https://github.com/bgilbert/rhcosbot/issues'
+ISSUE_LINK = 'https://github.com/coreos/rhcosbot/issues'
 HELP = f'''
 I understand these commands:
 %commands%
