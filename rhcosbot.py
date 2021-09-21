@@ -319,7 +319,7 @@ class Bugzilla:
         '''Return the words in the dev whiteboard for the specified Bug.'''
         return bug.cf_devel_whiteboard.split()
 
-    def ensure_bootimage_allowed(self, bug):
+    def ensure_bootimage_bug_allowed(self, bug):
         '''Raise Fail if the bug must not be added to a bootimage bump.'''
         deny_keywords = self._config.get('bootimage_deny_keywords', [])
         kw = set(deny_keywords) & set(bug.keywords)
@@ -536,7 +536,7 @@ class CommandHandler(metaclass=Registry):
         # Query bootimages if needed
         need_bootimage = self._bz.BOOTIMAGE_BUG_WHITEBOARD in self._bz.whiteboard(bug)
         if need_bootimage:
-            self._bz.ensure_bootimage_allowed(bug)
+            self._bz.ensure_bootimage_bug_allowed(bug)
             bootimages = self._bz.get_bootimages()
 
         # First, do checks
@@ -628,7 +628,7 @@ class CommandHandler(metaclass=Registry):
         '''Add a bug and its backports to planned bootimage bumps.'''
         # Look up the bug.  This validates the product and component.
         bug = self._bz.getbug(desc)
-        self._bz.ensure_bootimage_allowed(bug)
+        self._bz.ensure_bootimage_bug_allowed(bug)
 
         # Get planned bootimage bumps
         bootimages = self._bz.get_bootimages()
@@ -675,7 +675,7 @@ class CommandHandler(metaclass=Registry):
         '''Mark a bug ready for its bootimage bump.'''
         # Look up the bug.  This validates the product and component.
         bug = self._bz.getbug(desc)
-        self._bz.ensure_bootimage_allowed(bug)
+        self._bz.ensure_bootimage_bug_allowed(bug)
 
         if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(bug):
             raise Fail(f'Bug {bug.id} is not attached to a bootimage bump.')
