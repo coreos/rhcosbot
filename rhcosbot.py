@@ -252,7 +252,7 @@ class Bugzilla:
         # Check bug invariants
         bug_target = bug.target_release[0]
         if bug_target not in self._config.releases.current.targets:
-            raise Fail(f'Bug {bug.id} has non-current target release "{escape(bug_target)}".')
+            raise Fail(f'Bug {bug.id} targets release "{escape(bug_target)}" but latest release is {self._config.releases.current.target}.')
 
         # Walk each backport version
         cur_bug = bug
