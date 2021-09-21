@@ -593,14 +593,14 @@ class CommandHandler(metaclass=Registry):
         need_bootimage = self._bz.BOOTIMAGE_BUG_WHITEBOARD in self._bz.whiteboard(bug)
         if need_bootimage:
             self._bz.ensure_bootimage_bug_allowed(bug)
-            bootimages = self._bz.get_bootimages()
+            bootimages = self._bz.get_bootimages(fields=['blocks'])
 
         # First, do checks
         created_bootimages = []
         for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
             if need_bootimage:
                 if rel.label not in bootimages:
-                    bootimages[rel.label], created = self._bz.create_bootimage(rel)
+                    bootimages[rel.label], created = self._bz.create_bootimage(rel, fields=['blocks'])
                     if created:
                         created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
         groups = bug.groups
@@ -612,6 +612,7 @@ class CommandHandler(metaclass=Registry):
 
         # Walk each backport version
         cur_bug = bug
+        later_rel = self._config.releases.current
         created_bugs = []
         all_bugs = []
         for rel in self._config.releases.at_least(min_ver).previous.values():
@@ -643,7 +644,20 @@ class CommandHandler(metaclass=Registry):
                 bz = self._bz.api.createbug(info).id
                 cur_bug = self._bz.getbug(bz)
                 created_bugs.append(self._bug_link(cur_bug, rel.label))
+                if need_bootimage:
+                    # Ensure this bootimage bump is blocked by the one for
+                    # the more recent release.  Thus we dynamically track
+                    # bootimage dependencies rather than imposing a fixed
+                    # relationship between bumps in adjacent releases.  For
+                    # example, a bump for 4.6 may coalesce the contents of
+                    # two 4.7 bumps.
+                    if bootimages[rel.label].id not in bootimages[later_rel.label].blocks:
+                        info = self._bz.api.build_update(
+                            blocks_add=[bootimages[rel.label].id],
+                        )
+                        self._bz.api.update_bugs([bootimages[later_rel.label].id], info)
             all_bugs.append(self._bug_link(cur_bug, rel.label))
+            later_rel = rel
 
         created_bugs.reverse()
         all_bugs.reverse()
@@ -703,7 +717,7 @@ class CommandHandler(metaclass=Registry):
         self._bz.ensure_bootimage_bug_allowed(bug)
 
         # Get planned bootimage bumps
-        bootimages = self._bz.get_bootimages()
+        bootimages = self._bz.get_bootimages(fields=['blocks'])
 
         # Get bug and its backports
         bugs = [bug] + self._bz.get_backports(bug)
@@ -713,7 +727,7 @@ class CommandHandler(metaclass=Registry):
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             assert cur_bug.target_release[0] in rel.targets
             if rel.label not in bootimages:
-                bootimages[rel.label], created = self._bz.create_bootimage(rel)
+                bootimages[rel.label], created = self._bz.create_bootimage(rel, fields=['blocks'])
                 if created:
                     created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
             if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
@@ -721,6 +735,7 @@ class CommandHandler(metaclass=Registry):
                     raise Fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
 
         # Add to bootimage bumps; generate report
+        later_rel = None
         added_bugs = []
         all_bugs = []
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
@@ -734,6 +749,19 @@ class CommandHandler(metaclass=Registry):
                 update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_WHITEBOARD}'
                 self._bz.api.update_bugs([cur_bug.id], update)
                 added_bugs.append(link)
+                if later_rel is not None:
+                    # Ensure this bootimage bump is blocked by the one for
+                    # the more recent release.  Thus we dynamically track
+                    # bootimage dependencies rather than imposing a fixed
+                    # relationship between bumps in adjacent releases.  For
+                    # example, a bump for 4.6 may coalesce the contents of
+                    # two 4.7 bumps.
+                    if bootimages[rel.label].id not in bootimages[later_rel.label].blocks:
+                        info = self._bz.api.build_update(
+                            blocks_add=[bootimages[rel.label].id],
+                        )
+                        self._bz.api.update_bugs([bootimages[later_rel.label].id], info)
+            later_rel = rel
 
         # Show report
         added_bugs.reverse()
