@@ -321,6 +321,32 @@ class Bugzilla:
         if kw:
             raise Fail(f'By policy, this bug cannot be added to a bootimage bump because of keywords: *{escape(", ".join(kw))}*')
 
+    def update_bootimage_bug_status(self, bootimage_status, bootimage_bug_status,
+            new_bootimage_bug_status, comment):
+        '''Find all bootimage bugs in status bootimage_bug_status (list) and
+        associated with a bootimage in status bootimage_status (singular),
+        then move them to new_bootimage_bug_status with the specified comment,
+        which supports the format fields "bootimage" (bootimage BZ ID) and
+        "status" (bootimage BZ status).'''
+        bootimages = self.get_bootimages(status=bootimage_status)
+        for label, rel in self._config.releases.items():
+            try:
+                bootimage = bootimages[label]
+            except KeyError:
+                continue
+            bugs = self.get_bootimage_bugs(bootimage, rel,
+                    status=bootimage_bug_status)
+            if not bugs:
+                continue
+            update = self.api.build_update(
+                status=new_bootimage_bug_status,
+                comment=comment.format(
+                    bootimage=bootimage.id,
+                    status=bootimage.status
+                ),
+            )
+            self.api.update_bugs([b.id for b in bugs], update)
+
 
 def report_errors(f):
     '''Decorator that sends exceptions to an administrator via Slack DM
@@ -772,21 +798,12 @@ def periodic(config, db, bz):
     # Find bugs in state MODIFIED or later which are attached to bootimage
     # bumps in POST or earlier, and move the bugs back to POST.
     for status in ('ASSIGNED', 'POST'):
-        bootimages = bz.get_bootimages(status=status)
-        for label, rel in config.releases.items():
-            try:
-                bootimage = bootimages[label]
-            except KeyError:
-                continue
-            bugs = bz.get_bootimage_bugs(bootimage, rel,
-                    status=['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'])
-            if not bugs:
-                continue
-            update = bz.api.build_update(
-                status='POST',
-                comment=f'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage.id}, which is in state {bootimage.status}.  Moving this bug back to POST.',
-            )
-            bz.api.update_bugs([b.id for b in bugs], update)
+        bz.update_bootimage_bug_status(
+            status,
+            ['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'],
+            'POST',
+            'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which is in state {status}.  Moving this bug back to POST.',
+        )
 
 
 def main():
