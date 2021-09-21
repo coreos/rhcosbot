@@ -596,10 +596,13 @@ class CommandHandler(metaclass=Registry):
             bootimages = self._bz.get_bootimages()
 
         # First, do checks
+        created_bootimages = []
         for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
             if need_bootimage:
                 if rel.label not in bootimages:
-                    raise Fail(f"Couldn't find bootimage for {rel.label}.")
+                    bootimages[rel.label], created = self._bz.create_bootimage(rel)
+                    if created:
+                        created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
         groups = bug.groups
         allow_groups = self._config.get('backport_allow_groups', [])
         if allow_groups:
@@ -645,6 +648,8 @@ class CommandHandler(metaclass=Registry):
         created_bugs.reverse()
         all_bugs.reverse()
         message = ''
+        if created_bootimages:
+            message += f'Created bootimage bugs: {", ".join(created_bootimages)}\n'
         if created_bugs:
             message += f'Created bugs: {", ".join(created_bugs)}\n'
         message += f'All backports: {", ".join(all_bugs)}'
@@ -704,10 +709,13 @@ class CommandHandler(metaclass=Registry):
         bugs = [bug] + self._bz.get_backports(bug)
 
         # First, do checks
+        created_bootimages = []
         for rel, cur_bug in zip(self._config.releases.values(), bugs):
             assert cur_bug.target_release[0] in rel.targets
             if rel.label not in bootimages:
-                raise Fail(f"Couldn't find bootimage for {rel.label} for bug {cur_bug.id}.")
+                bootimages[rel.label], created = self._bz.create_bootimage(rel)
+                if created:
+                    created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
             if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
                 if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
                     raise Fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
@@ -731,6 +739,8 @@ class CommandHandler(metaclass=Registry):
         added_bugs.reverse()
         all_bugs.reverse()
         message = ''
+        if created_bootimages:
+            message += f'Created bootimage bugs: {", ".join(created_bootimages)}\n'
         if added_bugs:
             message += f'Added to bootimage: {", ".join(added_bugs)}\n'
         message += f'All bugs: {", ".join(all_bugs)}'
