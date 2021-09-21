@@ -32,6 +32,10 @@ _POST and ready for bootimage_
 Report problems <{ISSUE_LINK}|here>.
 '''
 
+
+bootimage_creation_lock = threading.Lock()
+
+
 def escape(message):
     '''Escape a string for inclusion in a Slack message.'''
     # https://api.slack.com/reference/surfaces/formatting#escaping
@@ -99,6 +103,7 @@ class Release:
 
     def __init__(self, config_struct):
         self.label = config_struct.label
+        self.version = config_struct.bz_version
         self.target = config_struct.bz_target
         self.aliases = config_struct.get('bz_target_aliases', [])
 
@@ -318,6 +323,57 @@ class Bugzilla:
     def whiteboard(bug):
         '''Return the words in the dev whiteboard for the specified Bug.'''
         return bug.cf_devel_whiteboard.split()
+
+    def create_bootimage(self, release, fields=[]):
+        '''Create or look up a bootimage bug for the specified release and
+        return a bug including the specified fields, and a boolean
+        indicating whether the bootimage bug was newly created.'''
+        # Lock to make sure multiple Slack commands don't race to create the
+        # bug
+        with bootimage_creation_lock:
+            created = False
+            # Double-check for the BZ under the creation lock
+            bugs = self.query(
+                status='ASSIGNED',
+                whiteboard=self.BOOTIMAGE_WHITEBOARD,
+                target_release=release.targets
+            )
+            if len(bugs) > 1:
+                raise Fail(f'Found multiple existing bootimage bumps for release {release.label} with status ASSIGNED: {", ".join(str(b.id) for b in bugs)}')
+            elif bugs:
+                # Reuse existing bug
+                bz = bugs[0].id
+            else:
+                # Create new bug
+                desc = f'Tracker bug for bootimage bump in {release.label}.  This bug should block bugs which need a bootimage bump to fix.'
+                # Find the most recent bump for this release, if any.
+                # Use the one with the highest ID.
+                previous = self.query(
+                    status=['POST', 'MODIFIED', 'ON_QA', 'VERIFIED', 'RELEASE_PENDING', 'CLOSED'],
+                    whiteboard=self.BOOTIMAGE_WHITEBOARD,
+                    target_release=release.targets,
+                )
+                if previous:
+                    previous_id = list(b.id for b in previous)[-1]
+                    desc += f'\n\nThe previous bump was bug {previous_id}.'
+                info = self.api.build_createbug(
+                    product=self._config.bugzilla_product,
+                    component=self._config.bugzilla_component,
+                    version=release.version,
+                    summary=f'[{release.label}] Bootimage bump tracker',
+                    description=desc,
+                    cc=self._config.get('bugzilla_cc', []),
+                    assigned_to=self._config.bugzilla_assignee,
+                    severity=self._config.get('bugzilla_severity', 'medium'),
+                    status='ASSIGNED',
+                    target_release=release.target,
+                )
+                info['cf_devel_whiteboard'] = self.BOOTIMAGE_WHITEBOARD
+                if previous:
+                    info['cf_clone_of'] = previous_id
+                bz = self.api.createbug(info).id
+                created = True
+        return self.getbug(bz, fields=fields), created
 
     def ensure_bootimage_bug_allowed(self, bug):
         '''Raise Fail if the bug must not be added to a bootimage bump.'''
@@ -593,6 +649,17 @@ class CommandHandler(metaclass=Registry):
             message += f'Created bugs: {", ".join(created_bugs)}\n'
         message += f'All backports: {", ".join(all_bugs)}'
         self._reply(message, at_user=False)
+
+    @register(('bootimage', 'create'), ('release',),
+            doc='create bootimage bump (usually done automatically as needed)')
+    def _bootimage_create(self, label):
+        try:
+            rel = self._config.releases[label]
+        except KeyError:
+            raise Fail(f'Unknown release "{escape(label)}".')
+        bug, created = self._bz.create_bootimage(rel)
+        link = self._bug_link(bug, rel.label)
+        self._reply(f'{"Created" if created else "Existing"} bootimage bug: {link}', at_user=False)
 
     @register(('bootimage', 'list'), doc='list upcoming bootimage bumps')
     def _bootimage_list(self):

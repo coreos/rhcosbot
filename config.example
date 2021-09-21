@@ -22,6 +22,12 @@ bugzilla-product: OpenShift Container Platform
 bugzilla-component: RHCOS
 # Default assignee for bootimage bugs
 bugzilla-assignee: bovik@example.com
+# Default severity for bootimage bugs
+bugzilla-severity: medium
+# Additional CC's for bootimage bugs
+bugzilla-cc:
+  - mozilla@example.com
+  - fedora@example.com
 # Bugzilla polling interval in seconds
 bugzilla-poll-interval: 300
 
@@ -37,9 +43,11 @@ bootimage-deny-keywords:
 releases:
   # Friendly name for the release
   - label: "4.3"
+    bz-version: "4.3"
     # The preferred Bugzilla target release
     bz-target: 4.3.0
   - label: "4.2"
+    bz-version: "4.2"
     bz-target: 4.2.z
     # Other recognized Bugzilla target releases
     bz-target-aliases: [4.2.0]
