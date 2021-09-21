@@ -30,6 +30,8 @@ bugzilla-cc:
   - fedora@example.com
 # Bugzilla polling interval in seconds
 bugzilla-poll-interval: 300
+# Maintenance task interval in seconds
+bugzilla-maintenance-interval: 86400
 
 # When cloning a bug, filter out any groups other than these (because we may
 # not have access to add them), but fail if we would remove all groups

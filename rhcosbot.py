@@ -7,6 +7,7 @@ import bugzilla
 from collections import OrderedDict
 from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
+import itertools
 import os
 from slack_sdk import WebClient
 from slack_sdk.socket_mode import SocketModeClient
@@ -791,6 +792,9 @@ class CommandHandler(metaclass=Registry):
         if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._bz.whiteboard(bug):
             update = self._bz.api.build_update(
                 status='POST',
+                flags=[
+                    {'name': 'reviewed-in-sprint', 'status': '+'},
+                ],
                 comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
             )
             update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD}'
@@ -903,7 +907,7 @@ def process_event(config, socket_client, req):
 
 
 @report_errors
-def periodic(config, db, bz):
+def periodic(config, db, bz, maintenance):
     '''Run periodic tasks.'''
 
     # Prune database
@@ -930,6 +934,26 @@ def periodic(config, db, bz):
             'The fix for this bug has landed in a bootimage bump, as tracked in bug {bootimage} (now in status {status}).  Moving this bug to MODIFIED.',
             ready=True,
         )
+
+    # Find POST+ready bugs with reviewed-in-sprint- and set
+    # reviewed-in-sprint+.
+    if maintenance:
+        bugs = bz.query(
+            status='POST',
+            whiteboard=' '.join([
+                bz.BOOTIMAGE_BUG_WHITEBOARD,
+                bz.BOOTIMAGE_BUG_READY_WHITEBOARD,
+            ]),
+            flag='reviewed-in-sprint-',
+        )
+        if bugs:
+            bz.api.update_bugs([b.id for b in bugs], bz.api.build_update(
+                flags=[
+                    {'name': 'reviewed-in-sprint', 'status': '+'},
+                ],
+                # Don't send email
+                minor_update=True
+            ))
 
 
 def main():
@@ -973,8 +997,9 @@ def main():
     socket_client.connect()
 
     # Run periodic tasks
-    while True:
-        periodic(config, db, bz)
+    maint_period = config.bugzilla_maintenance_interval // config.bugzilla_poll_interval
+    for i in itertools.count():
+        periodic(config, db, bz, i % maint_period == 0)
         time.sleep(config.bugzilla_poll_interval)
 
 
