@@ -911,8 +911,9 @@ def periodic(config, db, bz, maintenance):
     '''Run periodic tasks.'''
 
     # Prune database
-    with db:
-        db.prune_events()
+    if maintenance:
+        with db:
+            db.prune_events()
 
     # Find bugs in state MODIFIED or later which are attached to bootimage
     # bumps in POST or earlier, and move the bugs back to POST.
