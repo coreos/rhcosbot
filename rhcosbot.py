@@ -295,16 +295,21 @@ class Bugzilla:
             ret[rel.label] = bug
         return ret
 
-    def get_bootimage_bugs(self, bootimage, release, fields=[], **kwargs):
+    def get_bootimage_bugs(self, bootimage, release, fields=[], ready=False,
+            **kwargs):
         '''Find bugs attached to the specified bootimage bump and release,
         which must match.  We normally refuse to create bootimage bugs
         outside our component, but if they've been created manually, detect
-        them anyway so bugs don't get missed.'''
+        them anyway so bugs don't get missed.  If ready is True, only find
+        bugs that are marked ready.'''
+        whiteboard = self.BOOTIMAGE_BUG_WHITEBOARD
+        if ready:
+            whiteboard += ' ' + self.BOOTIMAGE_BUG_READY_WHITEBOARD
         return self.query(
             dependson=[bootimage.id],
             target_release=release.targets,
             fields=fields,
-            whiteboard=self.BOOTIMAGE_BUG_WHITEBOARD,
+            whiteboard=whiteboard,
             default_component=False,
             **kwargs
         )
@@ -322,12 +327,13 @@ class Bugzilla:
             raise Fail(f'By policy, this bug cannot be added to a bootimage bump because of keywords: *{escape(", ".join(kw))}*')
 
     def update_bootimage_bug_status(self, bootimage_status, bootimage_bug_status,
-            new_bootimage_bug_status, comment):
+            new_bootimage_bug_status, comment, ready=False):
         '''Find all bootimage bugs in status bootimage_bug_status (list) and
         associated with a bootimage in status bootimage_status (singular),
         then move them to new_bootimage_bug_status with the specified comment,
         which supports the format fields "bootimage" (bootimage BZ ID) and
-        "status" (bootimage BZ status).'''
+        "status" (bootimage BZ status).  If ready is True, modify only
+        bootimage bugs which have been marked ready.'''
         bootimages = self.get_bootimages(status=bootimage_status)
         for label, rel in self._config.releases.items():
             try:
@@ -335,7 +341,7 @@ class Bugzilla:
             except KeyError:
                 continue
             bugs = self.get_bootimage_bugs(bootimage, rel,
-                    status=bootimage_bug_status)
+                    status=bootimage_bug_status, ready=ready)
             if not bugs:
                 continue
             update = self.api.build_update(
@@ -803,6 +809,17 @@ def periodic(config, db, bz):
             ['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'],
             'POST',
             'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which is in state {status}.  Moving this bug back to POST.',
+        )
+
+    # Find POST+ready bugs which are attached to bootimage bumps in MODIFIED
+    # or ON_QA, and move them to MODIFIED.
+    for status in ('MODIFIED', 'ON_QA'):
+        bz.update_bootimage_bug_status(
+            status,
+            ['POST'],
+            'MODIFIED',
+            'The fix for this bug has landed in a bootimage bump, as tracked in bug {bootimage} (now in status {status}).  Moving this bug to MODIFIED.',
+            ready=True,
         )
 
 
