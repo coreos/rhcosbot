@@ -706,6 +706,8 @@ class CommandHandler(metaclass=Registry):
                     report.append('• ' + self._bug_link(bug))
                 if not bugs:
                     report.append('_no bugs_')
+        if not report:
+            report.append('No bootimage bumps.')
         self._reply('\n'.join(report), at_user=False)
 
     @register(('bootimage', 'bug', 'add'), ('bz-url-or-id',),
@@ -831,6 +833,8 @@ class CommandHandler(metaclass=Registry):
                 report.append(f'\n*_{caption}_*:')
                 for bz, bug in sorted(progenitors.items()):
                     report.append(f'• {escape(bug.summary)} [{", ".join(groups[bz])}]')
+        if not report:
+            report.append('No bootimage bumps.')
         self._reply('\n'.join(report), at_user=False)
 
     @register(('release', 'list'), doc='list known releases',
