@@ -915,14 +915,14 @@ def periodic(config, db, bz, maintenance):
         with db:
             db.prune_events()
 
-    # Find bugs in state MODIFIED or later which are attached to bootimage
+    # Find bugs with status MODIFIED or later which are attached to bootimage
     # bumps in POST or earlier, and move the bugs back to POST.
     for status in ('ASSIGNED', 'POST'):
         bz.update_bootimage_bug_status(
             status,
             ['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'],
             'POST',
-            'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which is in state {status}.  Moving this bug back to POST.',
+            'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which has status {status}.  Moving this bug back to POST.',
         )
 
     # Find POST+ready bugs which are attached to bootimage bumps in MODIFIED
