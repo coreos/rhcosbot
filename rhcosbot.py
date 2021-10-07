@@ -26,7 +26,8 @@ I understand these commands:
 Bug statuses:
 :bugzilla: *NEW, ASSIGNED*
 :branch: POST
-:large_green_circle: _POST and in an RHCOS build_
+:test_tube: POST &amp; in RHCOS build &amp; awaiting verification
+:large_green_circle: _POST &amp; in RHCOS build &amp; verified_
 :checkyes: ~MODIFIED, ON_QA, VERIFIED, CLOSED~
 :thinking_face: ¿Other?
 
@@ -174,6 +175,7 @@ class Bugzilla:
     # Some standard BZ fields that we usually want
     DEFAULT_FIELDS = [
         'cf_devel_whiteboard',
+        'cf_verified',
         'component',
         'keywords',
         'product',
@@ -186,6 +188,8 @@ class Bugzilla:
     # Can't use hyphens or underscores, since those count as a word boundary
     BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
     BOOTIMAGE_BUG_BUILT_WHITEBOARD = 'imageBuilt'
+
+    BOOTIMAGE_BUG_VERIFIED = 'Tested'
 
     def __init__(self, config):
         self.api = bugzilla.Bugzilla(config.bugzilla,
@@ -561,7 +565,9 @@ class CommandHandler(metaclass=Registry):
             return link('*bugzilla*')
         if bug.status == 'POST':
             if self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD in self._bz.whiteboard(bug):
-                return link('_large_green_circle_')
+                if self._bz.BOOTIMAGE_BUG_VERIFIED in bug.cf_verified:
+                    return link('_large_green_circle_')
+                return link(' test_tube ')
             return link(' branch ')
         if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
             return link('~checkyes~')
@@ -796,7 +802,7 @@ class CommandHandler(metaclass=Registry):
                 flags=[
                     {'name': 'reviewed-in-sprint', 'status': '+'},
                 ],
-                comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
+                comment="This bug has been reported fixed in a new RHCOS build and is ready for QE verification.  To mark the bug verified, set the Verified field to Tested.  This bug will automatically move to MODIFIED once the fix has landed in a new bootimage.",
             )
             update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD}'
             self._bz.api.update_bugs([bug.id], update)
