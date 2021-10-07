@@ -326,9 +326,9 @@ class Bugzilla:
         return bug.cf_devel_whiteboard.split()
 
     def create_bootimage(self, release, fields=[]):
-        '''Create or look up a bootimage bug for the specified release and
+        '''Create or look up a bootimage for the specified release and
         return a bug including the specified fields, and a boolean
-        indicating whether the bootimage bug was newly created.'''
+        indicating whether the bootimage was newly created.'''
         # Lock to make sure multiple Slack commands don't race to create the
         # bug
         with bootimage_creation_lock:
