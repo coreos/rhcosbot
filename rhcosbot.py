@@ -24,11 +24,11 @@ I understand these commands:
 %commands%
 
 Bug statuses:
-*NEW, ASSIGNED*
-POST
-_POST and ready for bootimage_
-~MODIFIED, ON_QA, VERIFIED, CLOSED~
-¿Other?
+:bugzilla: *NEW, ASSIGNED*
+:branch: POST
+:large_green_circle: _POST and ready for bootimage_
+:checkyes: ~MODIFIED, ON_QA, VERIFIED, CLOSED~
+:thinking_face: ¿Other?
 
 Report problems <{ISSUE_LINK}|here>.
 '''
@@ -551,19 +551,21 @@ class CommandHandler(metaclass=Registry):
                 # disable Shodan link unfurls
                 unfurl_links=False, unfurl_media=False)
 
-    def _bug_link(self, bug, text=None):
+    def _bug_link(self, bug, text=None, icon=False):
         '''Format a Bug into a Slack link.'''
-        text = str(text) if text else bug.summary
-        link = f'<{self._config.bugzilla_bug_url}{str(bug.id)}|{escape(text)}>'
+        def link(format):
+            start, icon_, stop = format[0].strip(), f':{format[1:-1]}: ' if icon else '', format[-1].strip()
+            text_ = str(text) if text else bug.summary
+            return f'{start}<{self._config.bugzilla_bug_url}{str(bug.id)}|{icon_}{escape(text_)}>{stop}'
         if bug.status in ('NEW', 'ASSIGNED'):
-            return f'*{link}*'
+            return link('*bugzilla*')
         if bug.status == 'POST':
             if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD in self._bz.whiteboard(bug):
-                return f'_{link}_'
-            return link
+                return link('_large_green_circle_')
+            return link(' branch ')
         if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
-            return f'~{link}~'
-        return f'¿{link}?'
+            return link('~checkyes~')
+        return link('¿thinking_face?')
 
     @register(('backport',), ('bz-url-or-id', 'minimum-release'),
             doc='ensure there are backport bugs down to minimum-release')
@@ -704,7 +706,7 @@ class CommandHandler(metaclass=Registry):
                 bugs = self._bz.get_bootimage_bugs(bootimage, rel)
                 report.append('\n*For* ' + self._bug_link(bootimage, label) + ':')
                 for bug in bugs:
-                    report.append('• ' + self._bug_link(bug))
+                    report.append(self._bug_link(bug, icon=True))
                 if not bugs:
                     report.append('_no bugs_')
         if not report:
@@ -831,7 +833,7 @@ class CommandHandler(metaclass=Registry):
                     progenitors.setdefault(progenitor, bug)
                     # Associate this bug's link with the progenitor
                     groups.setdefault(progenitor, []).append(
-                        self._bug_link(bug, rel.label)
+                        self._bug_link(bug, rel.label, icon=True)
                     )
             if progenitors:
                 report.append(f'\n*_{caption}_*:')
