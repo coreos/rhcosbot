@@ -26,7 +26,7 @@ I understand these commands:
 Bug statuses:
 :bugzilla: *NEW, ASSIGNED*
 :branch: POST
-:large_green_circle: _POST and ready for bootimage_
+:large_green_circle: _POST and in an RHCOS build_
 :checkyes: ~MODIFIED, ON_QA, VERIFIED, CLOSED~
 :thinking_face: ¿Other?
 
@@ -185,7 +185,7 @@ class Bugzilla:
     BOOTIMAGE_WHITEBOARD = 'bootimage'
     # Can't use hyphens or underscores, since those count as a word boundary
     BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
-    BOOTIMAGE_BUG_READY_WHITEBOARD = 'bootimageReady'
+    BOOTIMAGE_BUG_BUILT_WHITEBOARD = 'imageBuilt'
 
     def __init__(self, config):
         self.api = bugzilla.Bugzilla(config.bugzilla,
@@ -301,16 +301,16 @@ class Bugzilla:
             ret[rel.label] = bug
         return ret
 
-    def get_bootimage_bugs(self, bootimage, release, fields=[], ready=False,
+    def get_bootimage_bugs(self, bootimage, release, fields=[], built=False,
             **kwargs):
         '''Find bugs attached to the specified bootimage bump and release,
         which must match.  We normally refuse to create bootimage bugs
         outside our component, but if they've been created manually, detect
-        them anyway so bugs don't get missed.  If ready is True, only find
-        bugs that are marked ready.'''
+        them anyway so bugs don't get missed.  If built is True, only find
+        bugs that are marked built.'''
         whiteboard = self.BOOTIMAGE_BUG_WHITEBOARD
-        if ready:
-            whiteboard += ' ' + self.BOOTIMAGE_BUG_READY_WHITEBOARD
+        if built:
+            whiteboard += ' ' + self.BOOTIMAGE_BUG_BUILT_WHITEBOARD
         return self.query(
             dependson=[bootimage.id],
             target_release=release.targets,
@@ -384,13 +384,13 @@ class Bugzilla:
             raise Fail(f'By policy, this bug cannot be added to a bootimage bump because of keywords: *{escape(", ".join(kw))}*')
 
     def update_bootimage_bug_status(self, bootimage_status, bootimage_bug_status,
-            new_bootimage_bug_status, comment, ready=False):
+            new_bootimage_bug_status, comment, built=False):
         '''Find all bootimage bugs in status bootimage_bug_status (list) and
         associated with a bootimage in status bootimage_status (singular),
         then move them to new_bootimage_bug_status with the specified comment,
         which supports the format fields "bootimage" (bootimage BZ ID) and
-        "status" (bootimage BZ status).  If ready is True, modify only
-        bootimage bugs which have been marked ready.'''
+        "status" (bootimage BZ status).  If built is True, modify only
+        bootimage bugs which have been marked built.'''
         bootimages = self.get_bootimages(status=bootimage_status)
         for label, rel in self._config.releases.items():
             try:
@@ -398,7 +398,7 @@ class Bugzilla:
             except KeyError:
                 continue
             bugs = self.get_bootimage_bugs(bootimage, rel,
-                    status=bootimage_bug_status, ready=ready)
+                    status=bootimage_bug_status, built=built)
             if not bugs:
                 continue
             update = self.api.build_update(
@@ -560,7 +560,7 @@ class CommandHandler(metaclass=Registry):
         if bug.status in ('NEW', 'ASSIGNED'):
             return link('*bugzilla*')
         if bug.status == 'POST':
-            if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD in self._bz.whiteboard(bug):
+            if self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD in self._bz.whiteboard(bug):
                 return link('_large_green_circle_')
             return link(' branch ')
         if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
@@ -779,10 +779,9 @@ class CommandHandler(metaclass=Registry):
         message += f'All bugs: {", ".join(all_bugs)}'
         self._reply(message, at_user=False)
 
-    @register(('bootimage', 'bug', 'ready'), ('bz-url-or-id',),
-            doc='mark a bug landed in plashet and waiting for bootimage')
-    def _bootimage_bug_ready(self, desc):
-        '''Mark a bug ready for its bootimage bump.'''
+    @register(('bootimage', 'bug', 'built'), ('bz-url-or-id',),
+            doc='mark a bug landed in an RHCOS build and ready for QE')
+    def _bootimage_bug_built(self, desc):
         # Look up the bug.  This validates the product and component.
         bug = self._bz.getbug(desc)
         self._bz.ensure_bootimage_bug_allowed(bug)
@@ -790,8 +789,8 @@ class CommandHandler(metaclass=Registry):
         if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(bug):
             raise Fail(f'Bug {bug.id} is not attached to a bootimage bump.')
         if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
-            raise Fail(f'Refusing to mark bug {bug.id} ready from status {bug.status}.')
-        if self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD not in self._bz.whiteboard(bug):
+            raise Fail(f'Refusing to mark bug {bug.id} built from status {bug.status}.')
+        if self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD not in self._bz.whiteboard(bug):
             update = self._bz.api.build_update(
                 status='POST',
                 flags=[
@@ -799,7 +798,7 @@ class CommandHandler(metaclass=Registry):
                 ],
                 comment="This bug has been reported fixed in a new RHCOS build.  Do not move this bug to MODIFIED until the fix has landed in a new bootimage.",
             )
-            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_READY_WHITEBOARD}'
+            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD}'
             self._bz.api.update_bugs([bug.id], update)
 
     @register(('bootimage', 'bug', 'list'),
@@ -927,7 +926,7 @@ def periodic(config, db, bz, maintenance):
             'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which has status {status}.  Moving this bug back to POST.',
         )
 
-    # Find POST+ready bugs which are attached to bootimage bumps in MODIFIED
+    # Find POST+built bugs which are attached to bootimage bumps in MODIFIED
     # or ON_QA, and move them to MODIFIED.
     for status in ('MODIFIED', 'ON_QA'):
         bz.update_bootimage_bug_status(
@@ -935,17 +934,17 @@ def periodic(config, db, bz, maintenance):
             ['POST'],
             'MODIFIED',
             'The fix for this bug has landed in a bootimage bump, as tracked in bug {bootimage} (now in status {status}).  Moving this bug to MODIFIED.',
-            ready=True,
+            built=True,
         )
 
-    # Find POST+ready bugs with reviewed-in-sprint- and set
+    # Find POST+built bugs with reviewed-in-sprint- and set
     # reviewed-in-sprint+.
     if maintenance:
         bugs = bz.query(
             status='POST',
             whiteboard=' '.join([
                 bz.BOOTIMAGE_BUG_WHITEBOARD,
-                bz.BOOTIMAGE_BUG_READY_WHITEBOARD,
+                bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD,
             ]),
             flag='reviewed-in-sprint-',
         )
