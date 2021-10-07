@@ -666,7 +666,7 @@ class CommandHandler(metaclass=Registry):
         all_bugs.reverse()
         message = ''
         if created_bootimages:
-            message += f'Created bootimage bugs: {", ".join(created_bootimages)}\n'
+            message += f'Created bootimage trackers: {", ".join(created_bootimages)}\n'
         if created_bugs:
             message += f'Created bugs: {", ".join(created_bugs)}\n'
         message += f'All backports: {", ".join(all_bugs)}'
@@ -681,7 +681,7 @@ class CommandHandler(metaclass=Registry):
             raise Fail(f'Unknown release "{escape(label)}".')
         bug, created = self._bz.create_bootimage(rel)
         link = self._bug_link(bug, rel.label)
-        self._reply(f'{"Created" if created else "Existing"} bootimage bug: {link}', at_user=False)
+        self._reply(f'{"Created" if created else "Existing"} bootimage tracker: {link}', at_user=False)
 
     @register(('bootimage', 'list'), doc='list upcoming bootimage bumps')
     def _bootimage_list(self):
@@ -773,7 +773,7 @@ class CommandHandler(metaclass=Registry):
         all_bugs.reverse()
         message = ''
         if created_bootimages:
-            message += f'Created bootimage bugs: {", ".join(created_bootimages)}\n'
+            message += f'Created bootimage trackers: {", ".join(created_bootimages)}\n'
         if added_bugs:
             message += f'Added to bootimage: {", ".join(added_bugs)}\n'
         message += f'All bugs: {", ".join(all_bugs)}'
