@@ -642,7 +642,6 @@ class CommandHandler(metaclass=Registry):
                     description=f'Backport the fix for bug {bug.id} to {rel.label}.',
                     assigned_to=bug.assigned_to,
                     keywords=bug.keywords,
-                    whiteboard=bug.whiteboard,
                     depends_on=depends,
                     groups=groups,
                     severity=bug.severity,
@@ -650,6 +649,7 @@ class CommandHandler(metaclass=Registry):
                     target_release=rel.target
                 )
                 info['cf_clone_of'] = cur_bug.id
+                info['whiteboard'] = bug.whiteboard
                 if need_bootimage:
                     info['cf_devel_whiteboard'] = self._bz.BOOTIMAGE_BUG_WHITEBOARD
                 bz = self._bz.api.createbug(info).id
