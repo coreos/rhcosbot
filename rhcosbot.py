@@ -178,7 +178,6 @@ class Bugzilla:
         'cf_verified',
         'component',
         'keywords',
-        'whiteboard',
         'product',
         'summary',
         'status',
@@ -591,6 +590,7 @@ class CommandHandler(metaclass=Registry):
             'groups',
             'severity',
             'version',
+            'whiteboard'
         ])
         if bug.severity == 'unspecified':
             # Eric-Paris-bot will unset the target version without a severity
