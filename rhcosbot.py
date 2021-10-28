@@ -595,6 +595,22 @@ class CommandHandler(metaclass=Registry):
         if bug.severity == 'unspecified':
             # Eric-Paris-bot will unset the target version without a severity
             raise Fail("Bug severity is not set; can't backport.")
+        # Find any bugs we block that have Security and not SecurityTracking
+        # keyword.  We'll need any new backport bugs to block those bugs as
+        # well.
+        blocks = [b.id for b in self._bz.query(
+            dependson=[bug.id],
+            default_component=False,
+            extra={
+                'f1': 'keywords',
+                'o1': 'allwords',
+                'v1': 'Security',
+                'n2': '1',
+                'f2': 'keywords',
+                'o2': 'anywords',
+                'v2': 'SecurityTracking',
+            }
+        )]
 
         # Query existing backport bugs
         backports = self._bz.get_backports(bug, min_ver=min_ver)
@@ -643,6 +659,7 @@ class CommandHandler(metaclass=Registry):
                     assigned_to=bug.assigned_to,
                     keywords=bug.keywords,
                     depends_on=depends,
+                    blocks=blocks,
                     groups=groups,
                     severity=bug.severity,
                     status='ASSIGNED',
