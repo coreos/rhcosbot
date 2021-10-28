@@ -590,6 +590,7 @@ class CommandHandler(metaclass=Registry):
             'groups',
             'severity',
             'version',
+            'whiteboard'
         ])
         if bug.severity == 'unspecified':
             # Eric-Paris-bot will unset the target version without a severity
@@ -648,6 +649,7 @@ class CommandHandler(metaclass=Registry):
                     target_release=rel.target
                 )
                 info['cf_clone_of'] = cur_bug.id
+                info['whiteboard'] = bug.whiteboard
                 if need_bootimage:
                     info['cf_devel_whiteboard'] = self._bz.BOOTIMAGE_BUG_WHITEBOARD
                 bz = self._bz.api.createbug(info).id
