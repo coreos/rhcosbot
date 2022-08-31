@@ -1,6 +1,6 @@
 # RHCOS bot
 
-This is a Slack bot to help with managing RHCOS backports and bootimage bumps.  It is stateless (except for some replay protection on Slack messages) and command-driven, pulling all of its data from Bugzilla.
+This is a Slack bot to help with managing RHCOS backports and bootimage bumps.  It is stateless (except for some replay protection on Slack messages) and command-driven, pulling all of its data from Jira.
 
 ## Installing
 

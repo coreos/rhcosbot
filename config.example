@@ -9,47 +9,45 @@ channel: Cxxx
 # User ID that will receive error tracebacks via DM
 error-notification: Uxxx
 
-# Hostname of the Bugzilla server
-bugzilla: bugzilla.redhat.com
-# Prefix of user-friendly bug URL
-bugzilla-bug-url: https://bugzilla.redhat.com/show_bug.cgi?id=
-# Bugzilla API key
-# (if not specified in RHCOSBOT_BUGZILLA_KEY env var)
-bugzilla-key: xxx
-# Product containing the bugzilla-component
-bugzilla-product: OpenShift Container Platform
-# Component to file bootimage bump bugs against
-bugzilla-component: RHCOS
-# Default assignee for bootimage bugs
-bugzilla-assignee: bovik@example.com
-# Default severity for bootimage bugs
-bugzilla-severity: medium
-# Additional CC's for bootimage bugs
-bugzilla-cc:
+# URL of the Jira server
+jira: https://issues.redhat.com/
+# Prefix of user-friendly issue URL
+jira-issue-url: https://issues.redhat.com/browse/
+# Jira personal access token
+# (if not specified in RHCOSBOT_JIRA_TOKEN env var)
+jira-token: xxx
+# Project key containing the jira-component
+jira-project-key: OCPBUGS
+# Component to file bootimage bump trackers against
+jira-component: RHCOS
+# Default assignee for bootimage trackers
+jira-assignee: bovik@example.com
+# Default severity for bootimage trackers
+jira-severity: Moderate
+# Watchers for bootimage trackers
+jira-watchers:
   - mozilla@example.com
   - fedora@example.com
-# Bugzilla polling interval in seconds
-bugzilla-poll-interval: 300
+# Jira polling interval in seconds
+jira-poll-interval: 300
 # Maintenance task interval in seconds
-bugzilla-maintenance-interval: 86400
+jira-maintenance-interval: 86400
+# Log search queries to stdout
+jira-log-searches: false
 
-# When cloning a bug, filter out any groups other than these (because we may
-# not have access to add them), but fail if we would remove all groups
-backport-allow-groups:
-  - devel
-# Refuse to add bugs with these keywords to a bootimage bump
-bootimage-deny-keywords:
+# Refuse to add issues with these labels to a bootimage bump
+bootimage-deny-labels:
   - SecurityTracking
 
 # Possible RHCOS target releases, newest first
 releases:
   # Friendly name for the release
   - label: "4.3"
-    bz-version: "4.3"
-    # The preferred Bugzilla target release
-    bz-target: 4.3.0
+    jira-affects-version: "4.3"
+    # The preferred target version
+    jira-target-version: 4.3.0
   - label: "4.2"
-    bz-version: "4.2"
-    bz-target: 4.2.z
-    # Other recognized Bugzilla target releases
-    bz-target-aliases: [4.2.0]
+    jira-affects-version: "4.2"
+    jira-target-version: 4.2.z
+    # Other recognized target versions
+    jira-target-version-aliases: [4.2.0]

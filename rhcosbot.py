@@ -3,11 +3,11 @@
 # Apache 2.0 license
 
 import argparse
-import bugzilla
 from collections import OrderedDict
 from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import itertools
+from jira import JIRA, JIRAError
 import os
 from slack_sdk import WebClient
 from slack_sdk.socket_mode import SocketModeClient
@@ -23,19 +23,19 @@ HELP = f'''
 I understand these commands:
 %commands%
 
-Bug statuses:
-:bugzilla: *NEW, ASSIGNED*
+Issue statuses:
+:jira-1992: *New, ASSIGNED*
 :branch: POST
 :test_tube: POST &amp; in RHCOS build &amp; awaiting verification
 :large_green_circle: _POST &amp; in RHCOS build &amp; verified_
-:checkyes: ~MODIFIED, ON_QA, VERIFIED, CLOSED~
+:checkyes: ~MODIFIED, ON_QA, Verified, Closed~
 :thinking_face: ¿Other?
 
 Report problems <{ISSUE_LINK}|here>.
 '''
 
 
-bootimage_creation_lock = threading.Lock()
+tracker_creation_lock = threading.Lock()
 
 
 def escape(message):
@@ -105,16 +105,16 @@ class Release:
 
     def __init__(self, config_struct):
         self.label = config_struct.label
-        self.version = config_struct.bz_version
-        self.target = config_struct.bz_target
-        self.aliases = config_struct.get('bz_target_aliases', [])
+        self.affects_version = config_struct.jira_affects_version
+        self.target_version = config_struct.jira_target_version
+        self.target_version_aliases = config_struct.get('jira_target_version_aliases', [])
 
     def __repr__(self):
         return f'<{self.__class__.__name__} {self.label}>'
 
     @property
-    def targets(self):
-        return [self.target] + self.aliases
+    def target_versions(self):
+        return [self.target_version] + self.target_version_aliases
 
 
 class Releases(OrderedDict):
@@ -123,15 +123,15 @@ class Releases(OrderedDict):
     @classmethod
     def from_config(cls, config):
         ret = cls()
-        targets = set()
+        target_vers = set()
         for struct in config.releases:
             rel = Release(struct)
             ret[rel.label] = rel
-            # Validate that there are no duplicate targets
-            for target in [rel.target] + rel.aliases:
-                if target in targets:
-                    raise ValueError(f'Duplicate target version "{target}"')
-                targets.add(target)
+            # Validate that there are no duplicate target versions
+            for target_ver in rel.target_versions:
+                if target_ver in target_vers:
+                    raise ValueError(f'Duplicate target version "{target_ver}"')
+                target_vers.add(target_ver)
         return ret
 
     @property
@@ -159,260 +159,329 @@ class Releases(OrderedDict):
         raise KeyError(label)
 
     @cached_property
-    def by_target(self):
-        '''Return a map from target to Release.'''
+    def by_target_version(self):
+        '''Return a map from target version to Release.'''
         ret = {}
         for rel in self.values():
-            ret[rel.target] = rel
-            for alias in rel.aliases:
+            ret[rel.target_version] = rel
+            for alias in rel.target_version_aliases:
                 ret[alias] = rel
         return ret
 
 
-class Bugzilla:
-    '''Wrapper class for accessing Bugzilla.'''
+class Jira:
+    '''Wrapper class for accessing Jira.'''
 
-    # Some standard BZ fields that we usually want
+    # Some standard issue fields that we usually want
     DEFAULT_FIELDS = [
-        'cf_devel_whiteboard',
-        'cf_verified',
-        'component',
-        'keywords',
-        'product',
+        'components',
+        'issuelinks',
+        'labels',
+        'project',
         'summary',
         'status',
-        'target_release',
+        'target_versions',
     ]
 
-    BOOTIMAGE_WHITEBOARD = 'bootimage'
-    # Can't use hyphens or underscores, since those count as a word boundary
-    BOOTIMAGE_BUG_WHITEBOARD = 'bootimageNeeded'
-    BOOTIMAGE_BUG_BUILT_WHITEBOARD = 'imageBuilt'
-
-    BOOTIMAGE_BUG_VERIFIED = 'Tested'
+    BOOTIMAGE_TRACKER_LABEL = 'rhcos-bootimage-tracker'
+    BOOTIMAGE_ISSUE_LABEL = 'rhcos-bootimage-needed'
+    BOOTIMAGE_ISSUE_BUILT_LABEL = 'rhcos-image-built'
+    BOOTIMAGE_ISSUE_VERIFIED_LABEL = 'verified'
 
     def __init__(self, config):
-        self.api = bugzilla.Bugzilla(config.bugzilla,
-                api_key=config.bugzilla_key, force_rest=True)
+        self.api = self.connect(config)
         self._config = config
 
-    def getbug(self, desc, fields=[]):
-        '''Query Bugzilla for a bug.  desc can be a bug number, or a string
-        with a bug number, or a BZ URL with optional anchor.'''
+    @staticmethod
+    def connect(config):
+        '''Low-level method to return a JIRA API object.'''
+        return JIRA(config.jira, token_auth=config.jira_token)
 
-        # Convert desc to integer
+    @cached_property
+    def _field_map(self):
+        return {
+            # "versions" is ambiguous, so rename to something more specific
+            'affects_versions': 'versions',
+            # Jira custom fields
+            'severity': self._config.fields['Severity'],
+            'target_versions': self._config.fields['Target Version'],
+        }
+
+    def field(self, name):
+        return self._field_map.get(name, name)
+
+    def _patch_issue(self, issue):
+        # Replace custom fields with convenience names
+        for k, v in self._field_map.items():
+            if hasattr(issue.fields, v):
+                setattr(issue.fields, k, getattr(issue.fields, v))
+                delattr(issue.fields, v)
+        # Add convenience fields for issue links
+        for name in 'blocks', 'blocked_by', 'clones', 'cloned_by':
+            setattr(issue, name, [])
+        for link in issue.fields.issuelinks:
+            if link.type.name == 'Blocks' and hasattr(link, 'inwardIssue'):
+                issue.blocked_by.append(link.inwardIssue.id)
+            if link.type.name == 'Blocks' and hasattr(link, 'outwardIssue'):
+                issue.blocks.append(link.outwardIssue.id)
+            if link.type.name == 'Cloners' and hasattr(link, 'inwardIssue'):
+                issue.cloned_by.append(link.inwardIssue.id)
+            if link.type.name == 'Cloners' and hasattr(link, 'outwardIssue'):
+                issue.clones.append(link.outwardIssue.id)
+
+    def issue(self, desc, fields=[]):
+        '''Query Jira for an issue.  desc can be an issue number, or an issue
+        key, or an issue URL with optional query string.'''
+
         if isinstance(desc, str):
             # Slack puts URLs inside <>.
-            try:
-                bz = int(desc.replace(self._config.bugzilla_bug_url, '', 1). \
-                        split('#')[0]. \
-                        strip(' <>'))
-            except ValueError:
-                raise Fail("Invalid bug number.")
-        else:
-            bz = desc
+            desc = desc.replace(self._config.jira_issue_url, '', 1). \
+                    split('?')[0]. \
+                    strip(' <>')
 
-        # Query Bugzilla
+        # Query Jira
         fields = fields + self.DEFAULT_FIELDS
         try:
-            bug = self.api.getbug(bz, include_fields=fields)
-        except IndexError:
-            raise Fail(f"Couldn't find bug {bz}.")
+            issue = self.api.issue(desc, fields=[self.field(f) for f in fields])
+        except JIRAError as e:
+            if e.status_code == 404:
+                raise Fail(f"Couldn't find issue {desc}.")
+            raise
+        self._patch_issue(issue)
 
-        # Basic validation that it's safe to operate on this bug
-        if bug.product != self._config.bugzilla_product:
-            raise Fail(f'Bug {bz} has unexpected product "{escape(bug.product)}".')
-        if bug.component != self._config.bugzilla_component:
-            raise Fail(f'Bug {bz} has unexpected component "{escape(bug.component)}".')
+        # Basic validation that it's safe to operate on this issue
+        if issue.fields.project.key != self._config.jira_project_key:
+            raise Fail(f'Issue {desc} has unexpected project "{escape(issue.fields.project.key)}".')
+        if self._config.jira_component not in [c.name for c in issue.fields.components]:
+            components_str = ", ".join(f'"{c.name}"' for c in issue.fields.components) or "<none>"
+            raise Fail(f'Issue {desc} has unexpected component {escape(components_str)}.')
 
-        return bug
+        return issue
 
-    def query(self, fields=[], whiteboard=None, extra={},
-            default_component=True, **kwargs):
-        '''Search Bugzilla.  kwargs are passed to build_query().  Arguments
-        not supported by build_query can be passed in extra and will be
-        applied to the query dict afterward.  Limit to configured product/
+    def search_issues(self, *terms, contains={}, clones=None,
+            cloned_by=None, blocks=None, blocked_by=None, fields=[],
+            default_component=True):
+        '''Search Jira.  Terms are joined with ANDs.  contains gives allowed
+        values for the specified fields.  Limit to configured project/
         component unless default_component is False.'''
-
+        terms = list(terms)
         if default_component:
-            kwargs.update({
-                'product': self._config.bugzilla_product,
-                'component': self._config.bugzilla_component,
-            })
-        query = self.api.build_query(
-            include_fields=fields + self.DEFAULT_FIELDS,
-            **kwargs
+            terms.extend([
+                f'project = "{self._config.jira_project_key}"',
+                f'component = "{self._config.jira_component}"',
+            ])
+        for field, candidates in contains.items():
+            if field == 'target_versions':
+                # custom field ID doesn't work
+                field = '"Target Version"'
+            vals = ','.join(f'"{v}"' for v in candidates)
+            terms.append(f'{field} in ({vals})')
+        field_map = [
+            # search looks outward from the specified issue, so we need to
+            # reverse the direction
+            (clones, 'is cloned by'),
+            (cloned_by, 'clones'),
+            (blocks, 'is blocked by'),
+            (blocked_by, 'blocks'),
+        ]
+        for key, link_type in field_map:
+            if key is not None:
+                terms.append(f'issue IN linkedIssues({key}, "{link_type}")')
+        # IDs are not sequential (!) so have the server sort by creation date
+        query = ' AND '.join(f'({t})' for t in terms) + ' ORDER BY created ASC'
+        if self._config.get('jira_log_searches', False):
+            print(query)
+        issues = self.api.search_issues(
+            query,
+            fields=[self.field(f) for f in (fields + self.DEFAULT_FIELDS)],
+            maxResults=False,
         )
-        query.update(extra)
-        if whiteboard is not None:
-            query.update({
-                'f1': 'cf_devel_whiteboard',
-                'o1': 'allwords',
-                'v1': whiteboard,
-            })
-        return sorted(self.api.query(query), key=lambda b: b.id)
+        for issue in issues:
+            self._patch_issue(issue)
+        return issues
 
-    def get_backports(self, bug, fields=[], min_ver=None):
-        '''Follow the backport bug chain from the specified Bug, until we
-        reach min_ver or run out of bugs or configured releases.  Return a
-        list of Bugs from newest to oldest release, including the specified
-        Bugzilla fields.  Fail if the specified BZ doesn't match the
+    def create_issue_links(self, issue, blocks=[], blocked_by=[],
+            clones=[], cloned_by=[]):
+        '''Link issues.  All arguments must be keys, not IDs.'''
+        for other in blocks:
+            self.api.create_issue_link('blocks', issue, other)
+        for other in blocked_by:
+            self.api.create_issue_link('is blocked by', issue, other)
+        for other in clones:
+            self.api.create_issue_link('clones', issue, other)
+        for other in cloned_by:
+            self.api.create_issue_link('is cloned by', issue, other)
+
+    def get_backports(self, issue, fields=[], min_ver=None):
+        '''Follow the backport issue chain from the specified Issue, until we
+        reach min_ver or run out of issues or configured releases.  Return a
+        list of Issues from newest to oldest release, including the specified
+        Jira fields.  Fail if the specified issue doesn't match the
         configured current release.'''
 
-        # Check bug invariants
-        bug_target = bug.target_release[0]
-        if bug_target not in self._config.releases.current.targets:
-            raise Fail(f'Bug {bug.id} targets release "{escape(bug_target)}" but latest release is {self._config.releases.current.target}.')
+        # Check issue invariants
+        if issue.fields.target_versions is None:
+            raise Fail(f'{issue.key} has no target version; expected latest release {self._config.releases.current.target_version}.')
+        issue_target = issue.fields.target_versions[0]
+        if issue_target.name not in self._config.releases.current.target_versions:
+            raise Fail(f'{issue.key} targets release "{escape(issue_target.name)}" but latest release is {self._config.releases.current.target_version}.')
 
         # Walk each backport version
-        cur_bug = bug
+        cur_issue = issue
         ret = []
         for rel in self._config.releases.at_least(min_ver).previous.values():
-            # Check for an existing clone with this target release or
+            # Check for an existing clone with this target version or
             # one of its aliases
-            candidates = self.query(
-                target_release=rel.targets,
-                fields=fields,
-                extra={
-                    'cf_clone_of': cur_bug.id,
+            candidates = self.search_issues(
+                clones=cur_issue.id,
+                contains={
+                    'target_versions': rel.target_versions,
                 },
+                fields=fields,
             )
             if len(candidates) > 1:
-                bzlist = ', '.join(str(b.id) for b in candidates)
-                raise Fail(f"Found multiple clones of bug {cur_bug.id} with target release {rel.label}: {bzlist}")
+                keylist = ', '.join(str(b.key) for b in candidates)
+                raise Fail(f"Found multiple clones of {cur_issue.key} with target version {rel.label}: {keylist}")
             if len(candidates) == 0:
                 break
-            cur_bug = candidates[0]
-            ret.append(cur_bug)
+            cur_issue = candidates[0]
+            ret.append(cur_issue)
         return ret
 
-    def get_bootimages(self, status='ASSIGNED', fields=[]):
-        '''Get a map from release label to bootimage bump bug with the
-        specified status.  Fail if any release has multiple bootimage bumps
-        with that status.  Include the specified bug fields.'''
+    def get_bootimage_trackers(self, status='ASSIGNED', fields=[]):
+        '''Get a map from release label to bootimage tracker issue with the
+        specified status.  Fail if any release has multiple bootimage trackers
+        with that status.  Include the specified issue fields.'''
 
-        bugs = self.query(fields=fields, status=status,
-                whiteboard=self.BOOTIMAGE_WHITEBOARD)
+        issues = self.search_issues(
+            f'status = "{status}"',
+            f'labels = {self.BOOTIMAGE_TRACKER_LABEL}',
+            fields=fields,
+        )
         ret = {}
-        for bug in bugs:
+        for issue in issues:
             try:
-                rel = self._config.releases.by_target[bug.target_release[0]]
+                rel = self._config.releases.by_target_version[issue.fields.target_versions[0].name]
             except KeyError:
-                # unknown target release; ignore
+                # unknown target version; ignore
                 continue
             if rel.label in ret:
-                raise Fail(f'Found multiple bootimage bumps for release {rel.label} with status {status}: {ret[rel.label].id}, {bug.id}.')
-            ret[rel.label] = bug
+                raise Fail(f'Found multiple bootimage trackers for release {rel.label} with status {status}: {ret[rel.label].key}, {issue.key}.')
+            ret[rel.label] = issue
         return ret
 
-    def get_bootimage_bugs(self, bootimage, release, fields=[], built=False,
-            **kwargs):
-        '''Find bugs attached to the specified bootimage bump and release,
-        which must match.  We normally refuse to create bootimage bugs
+    def get_bootimage_issues(self, tracker, release, status=[], fields=[],
+            built=False):
+        '''Find issues attached to the specified bootimage tracker and release,
+        which must match.  We normally refuse to create bootimage issues
         outside our component, but if they've been created manually, detect
-        them anyway so bugs don't get missed.  If built is True, only find
-        bugs that are marked built.'''
-        whiteboard = self.BOOTIMAGE_BUG_WHITEBOARD
+        them anyway so issues don't get missed.  If status is specified,
+        returned issues must have one of the specified statuses.  If built
+        is True, only find issues that are marked built.'''
+        args = [f'labels = {self.BOOTIMAGE_ISSUE_LABEL}']
         if built:
-            whiteboard += ' ' + self.BOOTIMAGE_BUG_BUILT_WHITEBOARD
-        return self.query(
-            dependson=[bootimage.id],
-            target_release=release.targets,
+            args.append(f'labels = {self.BOOTIMAGE_ISSUE_BUILT_LABEL}')
+        contains = {
+            'target_versions': release.target_versions,
+        }
+        if status:
+            contains['status'] = status
+        return self.search_issues(
+            *args,
+            contains=contains,
+            blocked_by=tracker.id,
             fields=fields,
-            whiteboard=whiteboard,
-            default_component=False,
-            **kwargs
+            default_component=False
         )
 
-    @staticmethod
-    def whiteboard(bug):
-        '''Return the words in the dev whiteboard for the specified Bug.'''
-        return bug.cf_devel_whiteboard.split()
-
-    def create_bootimage(self, release, fields=[]):
-        '''Create or look up a bootimage for the specified release and
-        return a bug including the specified fields, and a boolean
-        indicating whether the bootimage was newly created.'''
+    def create_bootimage_tracker(self, release, fields=[]):
+        '''Create or look up a bootimage tracker for the specified release and
+        return an issue including the specified fields, and a boolean
+        indicating whether the tracker was newly created.'''
         # Lock to make sure multiple Slack commands don't race to create the
-        # bug
-        with bootimage_creation_lock:
-            created = False
-            # Double-check for the BZ under the creation lock
-            bugs = self.query(
-                status='ASSIGNED',
-                whiteboard=self.BOOTIMAGE_WHITEBOARD,
-                target_release=release.targets
+        # issue
+        with tracker_creation_lock:
+            # Double-check for the tracker under the creation lock
+            issues = self.search_issues(
+                f'status = ASSIGNED',
+                f'labels = {self.BOOTIMAGE_TRACKER_LABEL}',
+                contains={
+                    'target_versions': release.target_versions,
+                },
+                fields=fields
             )
-            if len(bugs) > 1:
-                raise Fail(f'Found multiple existing bootimage bumps for release {release.label} with status ASSIGNED: {", ".join(str(b.id) for b in bugs)}')
-            elif bugs:
-                # Reuse existing bug
-                bz = bugs[0].id
+            if len(issues) > 1:
+                raise Fail(f'Found multiple existing bootimage trackers for release {release.label} with status ASSIGNED: {", ".join(str(i.key) for i in issues)}')
+            elif issues:
+                # Reuse existing issue
+                return issues[0], False
             else:
-                # Create new bug
-                desc = f'Tracker bug for bootimage bump in {release.label}.  This bug should block bugs which need a bootimage bump to fix.'
+                # Create new issue
+                desc = f'Tracker issue for bootimage bump in {release.label}.  This issue should block issues which need a bootimage bump to fix.'
                 # Find the most recent bump for this release, if any.
                 # Use the one with the highest ID.
-                previous = self.query(
-                    status=['POST', 'MODIFIED', 'ON_QA', 'VERIFIED', 'RELEASE_PENDING', 'CLOSED'],
-                    whiteboard=self.BOOTIMAGE_WHITEBOARD,
-                    target_release=release.targets,
+                previous = self.search_issues(
+                    f'labels = {self.BOOTIMAGE_TRACKER_LABEL}',
+                    contains={
+                        'status': ['POST', 'MODIFIED', 'ON_QA', 'Verified', 'Release Pending', 'Closed'],
+                        'target_versions': release.target_versions,
+                    },
                 )
                 if previous:
-                    previous_id = list(b.id for b in previous)[-1]
-                    desc += f'\n\nThe previous bump was bug {previous_id}.'
-                info = self.api.build_createbug(
-                    product=self._config.bugzilla_product,
-                    component=self._config.bugzilla_component,
-                    version=release.version,
-                    summary=f'[{release.label}] Bootimage bump tracker',
-                    description=desc,
-                    cc=self._config.get('bugzilla_cc', []),
-                    assigned_to=self._config.bugzilla_assignee,
-                    severity=self._config.get('bugzilla_severity', 'medium'),
-                    status='ASSIGNED',
-                    target_release=release.target,
-                )
-                info['cf_devel_whiteboard'] = self.BOOTIMAGE_WHITEBOARD
+                    previous = previous[-1]
+                    desc += f'\n\nThe previous bump was {previous.key}.'
+                issue = self.api.create_issue(fields={
+                    self.field('issuetype'): 'Bug',
+                    self.field('project'): self._config.jira_project_key,
+                    self.field('components'): [{'name': self._config.jira_component}],
+                    self.field('affects_versions'): [{'name': release.affects_version}],
+                    self.field('summary'): f'[{release.label}] Bootimage bump tracker',
+                    self.field('description'): desc,
+                    self.field('assignee'): {'name': self._config.jira_assignee},
+                    self.field('severity'): {'value': self._config.get('jira_severity', 'Moderate')},
+                    self.field('target_versions'): [{'name': release.target_version}],
+                    self.field('labels'): [self.BOOTIMAGE_TRACKER_LABEL],
+                })
+                for watcher in self._config.get('jira_watchers', []):
+                    self.api.add_watcher(issue.id, watcher)
+                self.api.transition_issue(issue.id, 'ASSIGNED')
                 if previous:
-                    info['cf_clone_of'] = previous_id
-                bz = self.api.createbug(info).id
-                created = True
-        return self.getbug(bz, fields=fields), created
+                    self.create_issue_links(issue.key, clones=[previous.key])
+                return self.issue(issue.id, fields=fields), True
 
-    def ensure_bootimage_bug_allowed(self, bug):
-        '''Raise Fail if the bug must not be added to a bootimage bump.'''
-        deny_keywords = self._config.get('bootimage_deny_keywords', [])
-        kw = set(deny_keywords) & set(bug.keywords)
+    def ensure_bootimage_issue_allowed(self, issue):
+        '''Raise Fail if the issue must not be added to a bootimage tracker.'''
+        deny_labels = self._config.get('bootimage_deny_labels', [])
+        kw = set(deny_labels) & set(issue.fields.labels)
         if kw:
-            raise Fail(f'By policy, this bug cannot be added to a bootimage bump because of keywords: *{escape(", ".join(kw))}*')
+            raise Fail(f'By policy, this issue cannot be added to a bootimage tracker because of labels: *{escape(", ".join(kw))}*')
 
-    def update_bootimage_bug_status(self, bootimage_status, bootimage_bug_status,
-            new_bootimage_bug_status, comment, built=False):
-        '''Find all bootimage bugs in status bootimage_bug_status (list) and
-        associated with a bootimage in status bootimage_status (singular),
-        then move them to new_bootimage_bug_status with the specified comment,
-        which supports the format fields "bootimage" (bootimage BZ ID) and
-        "status" (bootimage BZ status).  If built is True, modify only
-        bootimage bugs which have been marked built.'''
-        bootimages = self.get_bootimages(status=bootimage_status)
+    def update_bootimage_issue_status(self, bootimage_tracker_status,
+            bootimage_issue_status, new_bootimage_issue_status, comment,
+            built=False):
+        '''Find all bootimage issues in status bootimage_issue_status (list)
+        and associated with a bootimage tracker in status
+        bootimage_tracker_status (singular), then move them to
+        new_bootimage_issue_status with the specified comment, which
+        supports the format fields "tracker" (bootimage tracker key) and
+        "status" (bootimage tracker status).  If built is True, modify only
+        bootimage issues which have been marked built.'''
+        trackers = self.get_bootimage_trackers(status=bootimage_tracker_status)
         for label, rel in self._config.releases.items():
             try:
-                bootimage = bootimages[label]
+                tracker = trackers[label]
             except KeyError:
                 continue
-            bugs = self.get_bootimage_bugs(bootimage, rel,
-                    status=bootimage_bug_status, built=built)
-            if not bugs:
-                continue
-            update = self.api.build_update(
-                status=new_bootimage_bug_status,
-                comment=comment.format(
-                    bootimage=bootimage.id,
-                    status=bootimage.status
-                ),
-            )
-            self.api.update_bugs([b.id for b in bugs], update)
+            issues = self.get_bootimage_issues(tracker, rel,
+                    status=bootimage_issue_status, built=built)
+            for issue in issues:
+                # comment argument doesn't seem to work for transitions that
+                # don't require one
+                self.api.transition_issue(issue.id, new_bootimage_issue_status)
+                self.api.add_comment(issue.id, comment.format(
+                    tracker=tracker.key,
+                    status=tracker.fields.status.name
+                ))
 
 
 def report_errors(f):
@@ -436,8 +505,8 @@ def report_errors(f):
             send(str(e))
         except HandledError:
             pass
-        except (json.JSONDecodeError, requests.ConnectionError, requests.HTTPError, requests.ReadTimeout) as e:
-            # Exception type leaked from the bugzilla API.  Assume transient
+        except requests.JSONDecodeError as e:
+            # Exception type leaked from the jira API.  Assume transient
             # network problem; don't send message.
             print(e)
         except (socket.timeout, urllib.error.URLError) as e:
@@ -486,14 +555,14 @@ class CommandHandler(metaclass=Registry):
         self._config = config
         self._event = event
         self._client = WebClient(token=config.slack_token)
-        self._bz = Bugzilla(config)
+        self._jira = Jira(config)
         self._called = False
 
     def __call__(self):
         assert not self._called
         self._called = True
 
-        message = self._event.text.replace(f'<@{self._config.bot_id}>', '').strip()
+        message = self._event.text.replace(f'<@{self._config.slack_id}>', '').strip()
         words = message.split()
         # Match the longest available subcommand
         for count in range(len(words), 0, -1):
@@ -536,7 +605,7 @@ class CommandHandler(metaclass=Registry):
                 return
 
         # Tried all possible subcommand lengths, found nothing in registry
-        self._reply(f"I didn't understand that.  Try `<@{self._config.bot_id}> help`")
+        self._reply(f"I didn't understand that.  Try `<@{self._config.slack_id}> help`")
         self._react('x')
 
     def _react(self, name):
@@ -555,28 +624,29 @@ class CommandHandler(metaclass=Registry):
                 # disable Shodan link unfurls
                 unfurl_links=False, unfurl_media=False)
 
-    def _bug_link(self, bug, text=None, icon=False):
-        '''Format a Bug into a Slack link.'''
+    def _issue_link(self, issue, text=None, icon=False):
+        '''Format an Issue into a Slack link.'''
         def link(format):
             start, icon_, stop = format[0].strip(), f':{format[1:-1]}: ' if icon else '', format[-1].strip()
-            text_ = str(text) if text else bug.summary
-            return f'{start}<{self._config.bugzilla_bug_url}{str(bug.id)}|{icon_}{escape(text_)}>{stop}'
-        if bug.status in ('NEW', 'ASSIGNED'):
-            return link('*bugzilla*')
-        if bug.status == 'POST':
-            if self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD in self._bz.whiteboard(bug):
-                if self._bz.BOOTIMAGE_BUG_VERIFIED in bug.cf_verified:
+            text_ = str(text) if text else issue.fields.summary
+            return f'{start}<{issue.permalink()}|{icon_}{escape(text_)}>{stop}'
+        status = issue.fields.status.name
+        if status in ('New', 'ASSIGNED'):
+            return link('*jira-1992*')
+        if status == 'POST':
+            if self._jira.BOOTIMAGE_ISSUE_BUILT_LABEL in issue.fields.labels:
+                if self._jira.BOOTIMAGE_ISSUE_VERIFIED_LABEL in issue.fields.labels:
                     return link('_large_green_circle_')
                 return link(' test_tube ')
             return link(' branch ')
-        if bug.status in ('MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'):
+        if status in ('MODIFIED', 'ON_QA', 'Verified', 'Closed'):
             return link('~checkyes~')
         return link('¿thinking_face?')
 
-    @register(('backport',), ('bz-url-or-id', 'minimum-release'),
-            doc='ensure there are backport bugs down to minimum-release')
+    @register(('backport',), ('issue-url-or-key', 'minimum-release'),
+            doc='ensure there are backport issues down to minimum-release')
     def _backport(self, desc, min_ver):
-        '''Ensure the existence of backport bugs for the specified BZ,
+        '''Ensure the existence of backport issues for the specified issue,
         in all releases >= the specified one.'''
         # Fail if release is invalid or current
         if min_ver not in self._config.releases:
@@ -584,247 +654,235 @@ class CommandHandler(metaclass=Registry):
         if min_ver == self._config.releases.current.label:
             raise Fail(f"{escape(min_ver)} is the current release; can't backport.")
 
-        # Look up the bug.  This validates the product and component.
-        bug = self._bz.getbug(desc, [
-            'assigned_to',
-            'groups',
+        # Look up the issue.  This validates the project and component.
+        issue = self._jira.issue(desc, [
+            'affects_versions',
+            'assignee',
+            'issuetype',
+            'security',
             'severity',
-            'version',
-            'whiteboard'
         ])
-        if bug.severity == 'unspecified':
+        if issue.fields.severity is None:
             # Eric-Paris-bot will unset the target version without a severity
-            raise Fail("Bug severity is not set; can't backport.")
-        # Find any bugs we block that have Security and not SecurityTracking
-        # keyword.  We'll need any new backport bugs to block those bugs as
+            raise Fail("Issue severity is not set; can't backport.")
+        # Find any issues we block that have Security and not SecurityTracking
+        # label.  We'll need any new backport issues to block those issues as
         # well.
-        blocks = [b.id for b in self._bz.query(
-            dependson=[bug.id],
+        blocks = self._jira.search_issues(
+            'labels = "Security"',
+            'labels != "SecurityTracking"',
+            blocked_by=issue.id,
             default_component=False,
-            extra={
-                'f1': 'keywords',
-                'o1': 'allwords',
-                'v1': 'Security',
-                'n2': '1',
-                'f2': 'keywords',
-                'o2': 'anywords',
-                'v2': 'SecurityTracking',
-            }
-        )]
+        )
 
-        # Query existing backport bugs
-        backports = self._bz.get_backports(bug, min_ver=min_ver)
+        # Query existing backport issues
+        backports = self._jira.get_backports(issue, min_ver=min_ver)
 
-        # Query bootimages if needed
-        need_bootimage = self._bz.BOOTIMAGE_BUG_WHITEBOARD in self._bz.whiteboard(bug)
+        # Query bootimage trackers if needed
+        need_bootimage = self._jira.BOOTIMAGE_ISSUE_LABEL in issue.fields.labels
         if need_bootimage:
-            self._bz.ensure_bootimage_bug_allowed(bug)
-            bootimages = self._bz.get_bootimages(fields=['blocks'])
+            self._jira.ensure_bootimage_issue_allowed(issue)
+            trackers = self._jira.get_bootimage_trackers()
 
         # First, do checks
-        created_bootimages = []
+        created_trackers = []
         for rel in list(self._config.releases.at_least(min_ver).previous.values())[len(backports):]:
             if need_bootimage:
-                if rel.label not in bootimages:
-                    bootimages[rel.label], created = self._bz.create_bootimage(rel, fields=['blocks'])
+                if rel.label not in trackers:
+                    trackers[rel.label], created = self._jira.create_bootimage_tracker(rel)
                     if created:
-                        created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
-        groups = bug.groups
-        allow_groups = self._config.get('backport_allow_groups', [])
-        if allow_groups:
-            groups = list(set(groups) & set(allow_groups))
-        if bug.groups and not groups:
-            raise Fail("Cannot add any of the bug's groups to new clones, and refusing to create a public bug.")
+                        created_trackers.append(self._issue_link(trackers[rel.label], rel.label))
 
         # Walk each backport version
-        cur_bug = bug
+        cur_issue = issue
         later_rel = self._config.releases.current
-        created_bugs = []
-        all_bugs = []
+        created_issues = []
+        all_issues = []
         for rel in self._config.releases.at_least(min_ver).previous.values():
             if backports:
-                # Have an existing bug
-                cur_bug = backports.pop(0)
+                # Have an existing issue
+                cur_issue = backports.pop(0)
             else:
                 # Make a new one
-                depends = [cur_bug.id]
+                fields = {
+                    self._jira.field('issuetype'): issue.fields.issuetype.name,
+                    self._jira.field('project'): issue.fields.project.key,
+                    self._jira.field('components'): [{'name': c.name} for c in issue.fields.components],
+                    self._jira.field('summary'): f'[{rel.label}] {issue.fields.summary}',
+                    self._jira.field('description'): f'Backport the fix for {issue.key} to {rel.label}.',
+                    self._jira.field('assignee'): {'name': issue.fields.assignee.name} if issue.fields.assignee else None,
+                    self._jira.field('severity'): {'value': issue.fields.severity.value},
+                    self._jira.field('labels'): issue.fields.labels,
+                    self._jira.field('affects_versions'): [{'name': v.name} for v in issue.fields.affects_versions],
+                    self._jira.field('target_versions'): [{'name': rel.target_version}],
+                }
+                if hasattr(issue.fields, 'security'):
+                    fields[self._jira.field('security')] = {'name': issue.fields.security.name}
                 if need_bootimage:
-                    depends.append(bootimages[rel.label].id)
-                info = self._bz.api.build_createbug(
-                    product=bug.product,
-                    component=bug.component,
-                    version=bug.version,
-                    summary=f'[{rel.label}] {bug.summary}',
-                    description=f'Backport the fix for bug {bug.id} to {rel.label}.',
-                    assigned_to=bug.assigned_to,
-                    keywords=bug.keywords,
-                    depends_on=depends,
-                    blocks=blocks,
-                    groups=groups,
-                    severity=bug.severity,
-                    status='ASSIGNED',
-                    target_release=rel.target
-                )
-                info['cf_clone_of'] = cur_bug.id
-                info['whiteboard'] = bug.whiteboard
+                    fields[self._jira.field('labels')].append(self._jira.BOOTIMAGE_ISSUE_LABEL)
+                prev_issue = cur_issue
+                cur_issue = self._jira.api.create_issue(fields=fields)
+                self._jira.api.transition_issue(cur_issue.id, 'ASSIGNED')
+                self._jira.create_issue_links(cur_issue.key,
+                        clones=[prev_issue.key], blocked_by=[prev_issue.key],
+                        blocks=[b.key for b in blocks])
                 if need_bootimage:
-                    info['cf_devel_whiteboard'] = self._bz.BOOTIMAGE_BUG_WHITEBOARD
-                bz = self._bz.api.createbug(info).id
-                cur_bug = self._bz.getbug(bz)
-                created_bugs.append(self._bug_link(cur_bug, rel.label))
+                    self._jira.create_issue_links(cur_issue.key,
+                            blocked_by=[trackers[rel.label].key])
+                created_issues.append(self._issue_link(cur_issue, rel.label))
                 if need_bootimage:
-                    # Ensure this bootimage bump is blocked by the one for
+                    # Ensure this bootimage tracker is blocked by the one for
                     # the more recent release.  Thus we dynamically track
-                    # bootimage dependencies rather than imposing a fixed
-                    # relationship between bumps in adjacent releases.  For
-                    # example, a bump for 4.6 may coalesce the contents of
-                    # two 4.7 bumps.
-                    if bootimages[rel.label].id not in bootimages[later_rel.label].blocks:
-                        info = self._bz.api.build_update(
-                            blocks_add=[bootimages[rel.label].id],
+                    # bootimage tracker dependencies rather than imposing a
+                    # fixed relationship between bumps in adjacent releases.
+                    # For example, a bump for 4.6 may coalesce the contents
+                    # of two 4.7 bumps.
+                    if trackers[rel.label].id not in trackers[later_rel.label].blocks:
+                        self._jira.create_issue_links(
+                            trackers[later_rel.label].key,
+                            blocks=[trackers[rel.label].key]
                         )
-                        self._bz.api.update_bugs([bootimages[later_rel.label].id], info)
-            all_bugs.append(self._bug_link(cur_bug, rel.label))
+            all_issues.append(self._issue_link(cur_issue, rel.label))
             later_rel = rel
 
-        created_bugs.reverse()
-        all_bugs.reverse()
+        created_issues.reverse()
+        all_issues.reverse()
         message = ''
-        if created_bootimages:
-            message += f'Created bootimage trackers: {", ".join(created_bootimages)}\n'
-        if created_bugs:
-            message += f'Created bugs: {", ".join(created_bugs)}\n'
-        message += f'All backports: {", ".join(all_bugs)}'
+        if created_trackers:
+            message += f'Created bootimage trackers: {", ".join(created_trackers)}\n'
+        if created_issues:
+            message += f'Created issues: {", ".join(created_issues)}\n'
+        message += f'All backports: {", ".join(all_issues)}'
         self._reply(message, at_user=False)
 
     @register(('bootimage', 'create'), ('release',),
-            doc='create bootimage bump (usually done automatically as needed)')
+            doc='create bootimage tracker (usually done automatically as needed)')
     def _bootimage_create(self, label):
         try:
             rel = self._config.releases[label]
         except KeyError:
             raise Fail(f'Unknown release "{escape(label)}".')
-        bug, created = self._bz.create_bootimage(rel)
-        link = self._bug_link(bug, rel.label)
+        issue, created = self._jira.create_bootimage_tracker(rel)
+        link = self._issue_link(issue, rel.label)
         self._reply(f'{"Created" if created else "Existing"} bootimage tracker: {link}', at_user=False)
 
     @register(('bootimage', 'list'), doc='list upcoming bootimage bumps')
     def _bootimage_list(self):
-        '''List bootimage bump BZs.'''
-
+        '''List bootimage tracker issues.'''
         sections = (
             ('Planned bootimage bumps', 'ASSIGNED'),
             ('Pending bootimage bumps', 'POST'),
         )
         report = []
         for caption, status in sections:
-            bootimages = self._bz.get_bootimages(status=status)
-            if not bootimages:
+            trackers = self._jira.get_bootimage_trackers(status=status)
+            if not trackers:
                 continue
             report.append(f'\n*_{caption}_*:')
             for label, rel in self._config.releases.items():
                 try:
-                    bootimage = bootimages[label]
+                    tracker = trackers[label]
                 except KeyError:
                     # nothing for this release
                     continue
-                bugs = self._bz.get_bootimage_bugs(bootimage, rel)
-                report.append('\n*For* ' + self._bug_link(bootimage, label) + ':')
-                for bug in bugs:
-                    report.append(self._bug_link(bug, icon=True))
-                if not bugs:
-                    report.append('_no bugs_')
+                issues = self._jira.get_bootimage_issues(tracker, rel)
+                report.append('\n*For* ' + self._issue_link(tracker, label) + ':')
+                for issue in issues:
+                    report.append(self._issue_link(issue, icon=True))
+                if not issues:
+                    report.append('_no issues_')
         if not report:
             report.append('No bootimage bumps.')
         self._reply('\n'.join(report), at_user=False)
 
-    @register(('bootimage', 'bug', 'add'), ('bz-url-or-id',),
-            doc='add a bug and its backports to planned bootimage bumps')
+    @register(('bootimage', 'bug', 'add'), ('issue-url-or-key',),
+            doc='add an issue and its backports to planned bootimage bumps')
     def _bootimage_bug_add(self, desc):
-        '''Add a bug and its backports to planned bootimage bumps.'''
-        # Look up the bug.  This validates the product and component.
-        bug = self._bz.getbug(desc)
-        self._bz.ensure_bootimage_bug_allowed(bug)
+        '''Add an issue and its backports to planned bootimage bumps.'''
+        # Look up the issue.  This validates the project and component.
+        issue = self._jira.issue(desc)
+        self._jira.ensure_bootimage_issue_allowed(issue)
 
         # Get planned bootimage bumps
-        bootimages = self._bz.get_bootimages(fields=['blocks'])
+        trackers = self._jira.get_bootimage_trackers()
 
-        # Get bug and its backports
-        bugs = [bug] + self._bz.get_backports(bug)
+        # Get issue and its backports
+        issues = [issue] + self._jira.get_backports(issue)
 
         # First, do checks
-        created_bootimages = []
-        for rel, cur_bug in zip(self._config.releases.values(), bugs):
-            assert cur_bug.target_release[0] in rel.targets
-            if rel.label not in bootimages:
-                bootimages[rel.label], created = self._bz.create_bootimage(rel, fields=['blocks'])
+        created_trackers = []
+        for rel, cur_issue in zip(self._config.releases.values(), issues):
+            assert cur_issue.fields.target_versions[0].name in rel.target_versions
+            if rel.label not in trackers:
+                trackers[rel.label], created = self._jira.create_bootimage_tracker(rel)
                 if created:
-                    created_bootimages.append(self._bug_link(bootimages[rel.label], rel.label))
-            if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
-                if cur_bug.status not in ('NEW', 'ASSIGNED', 'POST'):
-                    raise Fail(f'Refusing to add bug {cur_bug.id} in {cur_bug.status} to bootimage bump.')
+                    created_trackers.append(self._issue_link(trackers[rel.label], rel.label))
+            if self._jira.BOOTIMAGE_ISSUE_LABEL not in cur_issue.fields.labels:
+                if cur_issue.fields.status.name not in ('New', 'ASSIGNED', 'POST'):
+                    raise Fail(f'Refusing to add {cur_issue.key} in {cur_issue.fields.status.name} to bootimage tracker.')
 
-        # Add to bootimage bumps; generate report
+        # Add to bootimage trackers; generate report
         later_rel = None
-        added_bugs = []
-        all_bugs = []
-        for rel, cur_bug in zip(self._config.releases.values(), bugs):
-            link = self._bug_link(cur_bug, rel.label)
-            all_bugs.append(link)
-            if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(cur_bug):
-                bootimage = bootimages[rel.label]
-                update = self._bz.api.build_update(
-                    depends_on_add=[bootimage.id],
+        added_issues = []
+        all_issues = []
+        for rel, cur_issue in zip(self._config.releases.values(), issues):
+            link = self._issue_link(cur_issue, rel.label)
+            all_issues.append(link)
+            if self._jira.BOOTIMAGE_ISSUE_LABEL not in cur_issue.fields.labels:
+                self._jira.create_issue_links(
+                    cur_issue.key,
+                    blocked_by=[trackers[rel.label].key],
                 )
-                update['cf_devel_whiteboard'] = f'{cur_bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_WHITEBOARD}'
-                self._bz.api.update_bugs([cur_bug.id], update)
-                added_bugs.append(link)
+                cur_issue.update(fields={
+                    'labels': cur_issue.fields.labels + [self._jira.BOOTIMAGE_ISSUE_LABEL]
+                })
+                added_issues.append(link)
                 if later_rel is not None:
-                    # Ensure this bootimage bump is blocked by the one for
+                    # Ensure this bootimage tracker is blocked by the one for
                     # the more recent release.  Thus we dynamically track
                     # bootimage dependencies rather than imposing a fixed
                     # relationship between bumps in adjacent releases.  For
                     # example, a bump for 4.6 may coalesce the contents of
                     # two 4.7 bumps.
-                    if bootimages[rel.label].id not in bootimages[later_rel.label].blocks:
-                        info = self._bz.api.build_update(
-                            blocks_add=[bootimages[rel.label].id],
+                    if trackers[rel.label].id not in trackers[later_rel.label].blocks:
+                        self._jira.create_issue_links(
+                            trackers[later_rel.label].key,
+                            blocks=[trackers[rel.label].key],
                         )
-                        self._bz.api.update_bugs([bootimages[later_rel.label].id], info)
             later_rel = rel
 
         # Show report
-        added_bugs.reverse()
-        all_bugs.reverse()
+        added_issues.reverse()
+        all_issues.reverse()
         message = ''
-        if created_bootimages:
-            message += f'Created bootimage trackers: {", ".join(created_bootimages)}\n'
-        if added_bugs:
-            message += f'Added to bootimage: {", ".join(added_bugs)}\n'
-        message += f'All bugs: {", ".join(all_bugs)}'
+        if created_trackers:
+            message += f'Created bootimage trackers: {", ".join(created_trackers)}\n'
+        if added_issues:
+            message += f'Added to bootimage tracker: {", ".join(added_issues)}\n'
+        message += f'All issues: {", ".join(all_issues)}'
         self._reply(message, at_user=False)
 
-    @register(('bootimage', 'bug', 'built'), ('bz-url-or-id',),
-            doc='mark a bug landed in an RHCOS build and ready for QE')
+    @register(('bootimage', 'bug', 'built'), ('issue-url-or-key',),
+            doc='mark an issue landed in an RHCOS build and ready for QE')
     def _bootimage_bug_built(self, desc):
-        # Look up the bug.  This validates the product and component.
-        bug = self._bz.getbug(desc)
-        self._bz.ensure_bootimage_bug_allowed(bug)
+        # Look up the issue.  This validates the project and component.
+        issue = self._jira.issue(desc)
+        self._jira.ensure_bootimage_issue_allowed(issue)
 
-        if self._bz.BOOTIMAGE_BUG_WHITEBOARD not in self._bz.whiteboard(bug):
-            raise Fail(f'Bug {bug.id} is not attached to a bootimage bump.')
-        if bug.status not in ('NEW', 'ASSIGNED', 'POST'):
-            raise Fail(f'Refusing to mark bug {bug.id} built from status {bug.status}.')
-        if self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD not in self._bz.whiteboard(bug):
-            update = self._bz.api.build_update(
-                status='POST',
-                flags=[
-                    {'name': 'reviewed-in-sprint', 'status': '+'},
-                ],
-                comment="This bug has been reported fixed in a new RHCOS build and is ready for QE verification.  To mark the bug verified, set the Verified field to Tested.  This bug will automatically move to MODIFIED once the fix has landed in a new bootimage.",
+        if self._jira.BOOTIMAGE_ISSUE_LABEL not in issue.fields.labels:
+            raise Fail(f'{issue.key} is not attached to a bootimage tracker.')
+        if issue.fields.status.name not in ('New', 'ASSIGNED', 'POST'):
+            raise Fail(f'Refusing to mark {issue.key} built from status {issue.fields.status.name}.')
+        if self._jira.BOOTIMAGE_ISSUE_BUILT_LABEL not in issue.fields.labels:
+            if issue.fields.status.name != 'POST':
+                self._jira.api.transition_issue(issue.id, 'POST')
+            issue.update(fields={
+                'labels': issue.fields.labels + [self._jira.BOOTIMAGE_ISSUE_BUILT_LABEL],
+            })
+            self._jira.api.add_comment(
+                issue.id,
+                "This issue has been reported fixed in a new RHCOS build and is ready for QE verification.  To mark the issue verified, add the {{verified}} label.  This issue will automatically move to MODIFIED once the fix has landed in a new bootimage.",
             )
-            update['cf_devel_whiteboard'] = f'{bug.cf_devel_whiteboard} {self._bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD}'
-            self._bz.api.update_bugs([bug.id], update)
 
     @register(('bootimage', 'bug', 'list'),
             doc='list bugs on upcoming bootimage bumps')
@@ -835,36 +893,39 @@ class CommandHandler(metaclass=Registry):
         )
         report = []
         for caption, status in sections:
-            bootimages = self._bz.get_bootimages(status=status)
-            progenitors = {} # progenitor bug ID -> Bug
-            groups = {} # progenitor bug ID -> [bug links]
-            canonical = {} # backport bug ID -> progenitor bug ID
+            trackers = self._jira.get_bootimage_trackers(status=status)
+            progenitors = {} # progenitor issue ID -> Issue
+            groups = {} # progenitor issue ID -> [issue links]
+            canonical = {} # backport issue ID -> progenitor issue ID
             for label, rel in self._config.releases.items():
                 try:
-                    bootimage = bootimages[label]
+                    tracker = trackers[label]
                 except KeyError:
                     # nothing for this release
                     continue
-                bugs = self._bz.get_bootimage_bugs(bootimage, rel,
-                        fields=['cf_clone_of'])
-                for bug in bugs:
-                    # Find the progenitor from this bug's parent.  Maybe
+                issues = self._jira.get_bootimage_issues(tracker, rel)
+                for issue in issues:
+                    # Find the progenitor from this issue's parent.  Maybe
                     # there is none, and we're the progenitor.
-                    progenitor = canonical.get(bug.cf_clone_of, bug.id)
+                    progenitor = (
+                        [canonical[i] for i in issue.clones if i in canonical] +
+                        [issue.id]
+                    )[0]
                     # Add the next link in the ancestry chain
-                    canonical[bug.id] = progenitor
-                    # If we're the progenitor, record bug details
-                    progenitors.setdefault(progenitor, bug)
-                    # Associate this bug's link with the progenitor
+                    canonical[issue.id] = progenitor
+                    # If we're the progenitor, record issue details
+                    progenitors.setdefault(progenitor, issue)
+                    # Associate this issue's link with the progenitor
                     groups.setdefault(progenitor, []).append(
-                        self._bug_link(bug, rel.label, icon=True)
+                        self._issue_link(issue, rel.label, icon=True)
                     )
             if progenitors:
                 report.append(f'\n*_{caption}_*:')
-                for bz, bug in sorted(progenitors.items()):
-                    report.append(f'• {escape(bug.summary)} [{", ".join(groups[bz])}]')
+                # Python 3.7+ guarantees to preserve dict insertion order
+                for id, issue in progenitors.items():
+                    report.append(f'• {escape(issue.fields.summary)} [{", ".join(groups[id])}]')
         if not report:
-            report.append('No bootimage bumps.')
+            report.append('No bootimage trackers.')
         self._reply('\n'.join(report), at_user=False)
 
     @register(('release', 'list'), doc='list known releases',
@@ -872,20 +933,20 @@ class CommandHandler(metaclass=Registry):
     def _release_list(self):
         report = []
         for rel in reversed(self._config.releases.values()):
-            report.append(f'{rel.label}: *{rel.target}* {" ".join(rel.aliases)}')
+            aliases = f'~{" ".join(rel.target_version_aliases)}~' if rel.target_version_aliases else ''
+            report.append(f'{rel.label}: _{rel.affects_version}_ *{rel.target_version}* {aliases}')
         body = "\n".join(report)
-        self._reply(f'Release: *default-target* other-targets\n{body}\n', at_user=False)
+        self._reply(f'Release: _affects-version_ *default-target-version* ~other-target-versions~\n{body}\n', at_user=False)
 
     @register(('ping',), doc='check whether the bot is running properly',
             fast=True)
     def _ping(self):
-        # Check Bugzilla connectivity
+        # Check Jira connectivity
         try:
-            if not self._bz.api.logged_in:
-                raise Exception('Not logged in.')
+            self._jira.api.myself()
         except Exception:
             # Swallow exception details and just report the failure
-            raise Fail('Cannot contact Bugzilla.')
+            raise Fail('Cannot contact Jira.')
 
     @register(('help',), doc='print this message', fast=True, complete=False)
     def _help(self):
@@ -933,7 +994,7 @@ def process_event(config, socket_client, req):
 
 
 @report_errors
-def periodic(config, db, bz, maintenance):
+def periodic(config, db, jira, maintenance):
     '''Run periodic tasks.'''
 
     # Prune database
@@ -941,51 +1002,31 @@ def periodic(config, db, bz, maintenance):
         with db:
             db.prune_events()
 
-    # Find bugs with status MODIFIED or later which are attached to bootimage
-    # bumps in POST or earlier, and move the bugs back to POST.
+    # Find issues with status MODIFIED or later which are attached to
+    # bootimage trackers in POST or earlier, and move the issues back to POST.
     for status in ('ASSIGNED', 'POST'):
-        bz.update_bootimage_bug_status(
+        jira.update_bootimage_issue_status(
             status,
-            ['MODIFIED', 'ON_QA', 'VERIFIED', 'CLOSED'],
+            ['MODIFIED', 'ON_QA', 'Verified', 'Closed'],
             'POST',
-            'The fix for this bug will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in bug {bootimage}, which has status {status}.  Moving this bug back to POST.',
+            'The fix for this issue will not be delivered to customers until it lands in an updated bootimage.  That process is tracked in {tracker}, which has status {status}.  Moving this issue back to POST.',
         )
 
-    # Find POST+built bugs which are attached to bootimage bumps in MODIFIED
-    # or ON_QA, and move them to MODIFIED.
+    # Find POST+built issues which are attached to bootimage trackers in
+    # MODIFIED or ON_QA, and move them to MODIFIED.
     for status in ('MODIFIED', 'ON_QA'):
-        bz.update_bootimage_bug_status(
+        jira.update_bootimage_issue_status(
             status,
             ['POST'],
             'MODIFIED',
-            'The fix for this bug has landed in a bootimage bump, as tracked in bug {bootimage} (now in status {status}).  Moving this bug to MODIFIED.',
+            'The fix for this issue has landed in a bootimage bump, as tracked in {tracker} (now in status {status}).  Moving this issue to MODIFIED.',
             built=True,
         )
-
-    # Find POST+built bugs with reviewed-in-sprint- and set
-    # reviewed-in-sprint+.
-    if maintenance:
-        bugs = bz.query(
-            status='POST',
-            whiteboard=' '.join([
-                bz.BOOTIMAGE_BUG_WHITEBOARD,
-                bz.BOOTIMAGE_BUG_BUILT_WHITEBOARD,
-            ]),
-            flag='reviewed-in-sprint-',
-        )
-        if bugs:
-            bz.api.update_bugs([b.id for b in bugs], bz.api.build_update(
-                flags=[
-                    {'name': 'reviewed-in-sprint', 'status': '+'},
-                ],
-                # Don't send email
-                minor_update=True
-            ))
 
 
 def main():
     parser = argparse.ArgumentParser(
-            description='Bugzilla helper bot for Slack.')
+            description='Jira helper bot for Slack.')
     parser.add_argument('-c', '--config', metavar='FILE',
             default='~/.rhcosbot', help='config file')
     parser.add_argument('-d', '--database', metavar='FILE',
@@ -998,9 +1039,9 @@ def main():
         config.database = os.path.expanduser(args.database)
         config.releases = Releases.from_config(config)
     env_map = (
+        ('RHCOSBOT_JIRA_TOKEN', 'jira-token'),
         ('RHCOSBOT_SLACK_APP_TOKEN', 'slack-app-token'),
         ('RHCOSBOT_SLACK_TOKEN', 'slack-token'),
-        ('RHCOSBOT_BUGZILLA_KEY', 'bugzilla-key')
     )
     for env, config_key in env_map:
         v = os.environ.get(env)
@@ -1010,10 +1051,15 @@ def main():
     # Connect to services
     client = WebClient(token=config.slack_token)
     # store our user ID
-    config.bot_id = client.auth_test()['user_id']
-    bz = Bugzilla(config)
-    if not bz.api.logged_in:
+    config.slack_id = client.auth_test()['user_id']
+    # need to look up custom fields before constructing a Jira object
+    api = Jira.connect(config)
+    try:
+        api.myself()['name']
+    except JIRAError:
         raise Exception('Did not authenticate')
+    config.fields = {f['name']: f['id'] for f in api.fields()}
+    jira = Jira(config)
     db = Database(config)
 
     # Start socket-mode listener in the background
@@ -1024,10 +1070,10 @@ def main():
     socket_client.connect()
 
     # Run periodic tasks
-    maint_period = config.bugzilla_maintenance_interval // config.bugzilla_poll_interval
+    maint_period = config.jira_maintenance_interval // config.jira_poll_interval
     for i in itertools.count():
-        periodic(config, db, bz, i % maint_period == 0)
-        time.sleep(config.bugzilla_poll_interval)
+        periodic(config, db, jira, i % maint_period == 0)
+        time.sleep(config.jira_poll_interval)
 
 
 if __name__ == '__main__':
