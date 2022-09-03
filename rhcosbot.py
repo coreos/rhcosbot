@@ -505,6 +505,12 @@ def report_errors(f):
             send(str(e))
         except HandledError:
             pass
+        except JIRAError as e:
+            if e.status_code == 401:
+                # Searches sometimes throw 401 errors.  Don't send message.
+                print(e)
+            else:
+                send(f'Caught exception:\n```\n{traceback.format_exc()}```')
         except requests.JSONDecodeError as e:
             # Exception type leaked from the jira API.  Assume transient
             # network problem; don't send message.
