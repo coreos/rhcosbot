@@ -488,7 +488,7 @@ def report_errors(f):
     '''Decorator that sends exceptions to an administrator via Slack DM
     and then swallows them.  The first argument of the function must be
     the config.'''
-    import json, requests, socket, urllib.error
+    import json, requests, requests.exceptions, socket, urllib.error
     @wraps(f)
     def wrapper(config, *args, **kwargs):
         def send(message):
@@ -511,8 +511,8 @@ def report_errors(f):
                 print(e)
             else:
                 send(f'Caught exception:\n```\n{traceback.format_exc()}```')
-        except requests.JSONDecodeError as e:
-            # Exception type leaked from the jira API.  Assume transient
+        except (requests.JSONDecodeError, requests.exceptions.ChunkedEncodingError) as e:
+            # Exception types leaked from the jira API.  Assume transient
             # network problem; don't send message.
             print(e)
         except (socket.timeout, urllib.error.URLError) as e:
