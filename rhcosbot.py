@@ -8,6 +8,7 @@ from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import itertools
 from jira import JIRA, JIRAError
+from jira.resources import Issue as JIRAIssue
 import os
 from slack_sdk import WebClient
 from slack_sdk.socket_mode import SocketModeClient
@@ -195,7 +196,12 @@ class Jira:
     @staticmethod
     def connect(config):
         '''Low-level method to return a JIRA API object.'''
-        return JIRA(config.jira, token_auth=config.jira_token)
+        return JIRA(
+            config.jira, token_auth=config.jira_token,
+            default_batch_sizes={
+                JIRAIssue: 20,
+            }
+        )
 
     @cached_property
     def _field_map(self):
