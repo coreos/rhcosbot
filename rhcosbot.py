@@ -443,13 +443,13 @@ class Jira:
                     self.field('affects_versions'): [{'name': release.affects_version}],
                     self.field('summary'): f'[{release.label}] Bootimage bump tracker',
                     self.field('description'): desc,
-                    self.field('assignee'): {'name': self._config.jira_assignee},
                     self.field('severity'): {'value': self._config.get('jira_severity', 'Moderate')},
                     self.field('target_versions'): [{'name': release.target_version}],
                     self.field('labels'): [self.BOOTIMAGE_TRACKER_LABEL],
                 })
                 for watcher in self._config.get('jira_watchers', []):
                     self.api.add_watcher(issue.id, watcher)
+                self.api.assign_issue(issue.id, self._config.jira_assignee)
                 self.api.transition_issue(issue.id, 'ASSIGNED')
                 if previous:
                     self.create_issue_links(issue.key, clones=[previous.key])
@@ -718,7 +718,6 @@ class CommandHandler(metaclass=Registry):
                     self._jira.field('components'): [{'name': c.name} for c in issue.fields.components],
                     self._jira.field('summary'): f'[{rel.label}] {issue.fields.summary}',
                     self._jira.field('description'): f'Backport the fix for {issue.key} to {rel.label}.',
-                    self._jira.field('assignee'): {'name': issue.fields.assignee.name} if issue.fields.assignee else None,
                     self._jira.field('severity'): {'value': issue.fields.severity.value},
                     self._jira.field('labels'): issue.fields.labels,
                     self._jira.field('affects_versions'): [{'name': v.name} for v in issue.fields.affects_versions],
@@ -730,6 +729,10 @@ class CommandHandler(metaclass=Registry):
                     fields[self._jira.field('labels')].append(self._jira.BOOTIMAGE_ISSUE_LABEL)
                 prev_issue = cur_issue
                 cur_issue = self._jira.api.create_issue(fields=fields)
+                self._jira.api.assign_issue(
+                    cur_issue.id,
+                    issue.fields.assignee.name if issue.fields.assignee else None
+                )
                 self._jira.api.transition_issue(cur_issue.id, 'ASSIGNED')
                 self._jira.create_issue_links(cur_issue.key,
                         clones=[prev_issue.key], blocked_by=[prev_issue.key],
