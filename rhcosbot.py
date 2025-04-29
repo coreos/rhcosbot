@@ -1062,18 +1062,38 @@ def main():
             setattr(config, config_key, v)
 
     # Connect to services
-    client = WebClient(token=config.slack_token)
+    try:
+        client = WebClient(token=config.slack_token)
+    except Exception as e:
+        raise Exception(f"Error creating slack client: {e}")
+
     # store our user ID
-    config.slack_id = client.auth_test()['user_id']
+    try:
+        config.slack_id = client.auth_test()['user_id']
+    except Exception as e:
+        raise Exception(f"Error finding user id: {e}")
+
     # need to look up custom fields before constructing a Jira object
-    api = Jira.connect(config)
+    try:
+        api = Jira.connect(config)
+    except Exception as e:
+        raise Exception(f"Error connecting to Jira: {e}")
+
     try:
         api.myself()['name']
     except JIRAError:
         raise Exception('Did not authenticate')
     config.fields = {f['name']: f['id'] for f in api.fields()}
-    jira = Jira(config)
-    db = Database(config)
+
+    try:
+        jira = Jira(config)
+    except Exception as e:
+        raise Exception(f"Error creating Jira object: {e}")
+
+    try:
+        db = Database(config)
+    except Exception as e:
+        raise Exception(f"Error creating databse object: {e}")
 
     # Start socket-mode listener in the background
     socket_client = SocketModeClient(app_token=config.slack_app_token,
@@ -1081,6 +1101,8 @@ def main():
     socket_client.socket_mode_request_listeners.append(
             lambda socket_client, req: process_event(config, socket_client, req))
     socket_client.connect()
+
+    print("Application started successfully")
 
     # Run periodic tasks
     maint_period = config.jira_maintenance_interval // config.jira_poll_interval

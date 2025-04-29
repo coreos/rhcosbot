@@ -25,10 +25,13 @@ You'll also need to set up a Slack app in your workspace and get an API token fo
 
 ## Slack scopes
 
+- `channels:read` - view public channels in a workspace
 - `app_mentions:read` - receive commands via mentions in channel
 - `chat:write` - send threaded replies to channel
 - `im:write` - send error reports to the bot administrator
 - `reactions:write` - react to command messages to indicate status
+- `groups:read` - view private channels the bot has been invited to
+- `groups:write` - send threaded replies to private channels
 
 ## Config format
 
