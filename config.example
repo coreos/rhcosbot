@@ -9,11 +9,15 @@ channel: Cxxx
 # User ID that will receive error tracebacks via DM
 error-notification: Uxxx
 
-# URL of the Jira server
-jira: https://issues.redhat.com/
+# URL of the Jira Cloud server
+jira: https://redhat.atlassian.net/
 # Prefix of user-friendly issue URL
-jira-issue-url: https://issues.redhat.com/browse/
-# Jira personal access token
+jira-issue-url: https://redhat.atlassian.net/browse/
+# Jira username/email for Jira Cloud
+# For Atlassian Cloud, set this to the account email used with the API token.
+jira-user: you@example.com
+# Jira API token (not a personal access token -- generate one at
+# https://id.atlassian.com/manage-profile/security/api-tokens)
 # (if not specified in RHCOSBOT_JIRA_TOKEN env var)
 jira-token: xxx
 # Project key containing the jira-component

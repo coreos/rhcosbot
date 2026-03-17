@@ -197,10 +197,9 @@ class Jira:
     def connect(config):
         '''Low-level method to return a JIRA API object.'''
         return JIRA(
-            config.jira, token_auth=config.jira_token,
-            default_batch_sizes={
-                JIRAIssue: 20,
-            }
+            config.jira,
+            basic_auth=(config.jira_user, config.jira_token),
+            default_batch_sizes={JIRAIssue: 20},
         )
 
     @cached_property
@@ -1059,6 +1058,7 @@ def main():
         config.releases = Releases.from_config(config)
     env_map = (
         ('RHCOSBOT_JIRA_TOKEN', 'jira-token'),
+        ('RHCOSBOT_JIRA_USER', 'jira-user'),
         ('RHCOSBOT_SLACK_APP_TOKEN', 'slack-app-token'),
         ('RHCOSBOT_SLACK_TOKEN', 'slack-token'),
     )
@@ -1066,6 +1066,13 @@ def main():
         v = os.environ.get(env)
         if v:
             setattr(config, config_key, v)
+
+    for required in ('jira', 'jira_user', 'jira_token', 'slack_token',
+            'slack_app_token'):
+        if not config.get(required):
+            raise Exception(
+                f"Missing required config key: {required.replace('_', '-')}"
+            )
 
     # Connect to services
     try:
@@ -1086,9 +1093,17 @@ def main():
         raise Exception(f"Error connecting to Jira: {e}")
 
     try:
-        api.myself()['name']
-    except JIRAError:
+        me = api.myself()
+    except JIRAError as e:
         raise Exception('Did not authenticate')
+
+    # Jira Cloud no longer guarantees a 'name' field; prefer displayName
+    jira_user = (
+        me.get('displayName')
+        or me.get('name')
+        or me.get('accountId')
+        or '<unknown>'
+    )
     config.fields = {f['name']: f['id'] for f in api.fields()}
 
     try:
