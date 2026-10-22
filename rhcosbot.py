@@ -9,15 +9,19 @@ from functools import cached_property, reduce, wraps
 import itertools
 from jira import JIRA, JIRAError
 from jira.resources import Issue as JIRAIssue
+import logging
 import os
 from slack_sdk import WebClient
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 import sqlite3
+import sys
 import time
 import threading
 import traceback
 import yaml
+
+log = logging.getLogger(__name__)
 
 ISSUE_LINK = 'https://github.com/coreos/rhcosbot/issues'
 HELP = f'''
@@ -196,6 +200,11 @@ class Jira:
     @staticmethod
     def connect(config):
         '''Low-level method to return a JIRA API object.'''
+        log.debug(
+            "Connecting to Jira Cloud at %s as %s",
+            getattr(config, "jira", None),
+            getattr(config, "jira_user", None),
+        )
         return JIRA(
             config.jira,
             basic_auth=(config.jira_user, config.jira_token),
@@ -295,7 +304,7 @@ class Jira:
         # IDs are not sequential (!) so have the server sort by creation date
         query = ' AND '.join(f'({t})' for t in terms) + ' ORDER BY created ASC'
         if self._config.get('jira_log_searches', False):
-            print(query)
+            log.info("Jira search query: %s", query)
         issues = self.api.search_issues(
             query,
             fields=[self.field(f) for f in (fields + self.DEFAULT_FIELDS)],
@@ -504,10 +513,13 @@ def report_errors(f):
                 client = WebClient(token=config.slack_token)
                 channel = client.conversations_open(users=[config.error_notification])['channel']['id']
                 client.chat_postMessage(channel=channel, text=message)
-                # but always also print to the logs
-                print(message)
+                # but always also log to stdout/stderr
+                log.error("%s", message)
             except Exception:
-                traceback.print_exc()
+                log.exception(
+                    "Error sending Slack error notification; original message:\n%s",
+                    message,
+                )
         try:
             return f(config, *args, **kwargs)
         except Fail as e:
@@ -518,13 +530,13 @@ def report_errors(f):
         except JIRAError as e:
             if e.status_code == 401:
                 # Searches sometimes throw 401 errors.  Don't send message.
-                print(e)
+                log.warning("Jira 401 error: %s", e)
             else:
                 send(f'Caught exception:\n```\n{traceback.format_exc()}```')
         except (socket.timeout, urllib.error.URLError) as e:
             # Exception type leaked from the slack_sdk API.  Assume transient
             # network problem; don't send message.
-            print(e)
+            log.warning("Transient network error talking to Slack/Jira: %s", e)
         except Exception:
             send(f'Caught exception:\n```\n{traceback.format_exc()}```')
     return wrapper
@@ -1051,11 +1063,43 @@ def main():
             default='~/.rhcosbot-db', help='database file')
     args = parser.parse_args()
 
+    # Configure logging
+    log_level_name = os.environ.get('RHCOSBOT_LOG_LEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_name, None)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s',
+        stream=sys.stdout,
+    )
+    if not isinstance(log_level, int):
+        log.warning(
+            "Unrecognized RHCOSBOT_LOG_LEVEL %r; falling back to INFO.",
+            log_level_name,
+        )
+        log_level = logging.INFO
+    log.setLevel(log_level)  # only our logger follows RHCOSBOT_LOG_LEVEL
+
+    config_path = os.path.expanduser(args.config)
+    db_path = os.path.expanduser(args.database)
+    log.debug(
+        "rhcosbot starting with config file %s and database %s",
+        config_path,
+        db_path,
+    )
+
     # Read config
-    with open(os.path.expanduser(args.config)) as fh:
-        config = DottedDict(yaml.safe_load(fh))
-        config.database = os.path.expanduser(args.database)
-        config.releases = Releases.from_config(config)
+    try:
+        with open(config_path) as fh:
+            config = DottedDict(yaml.safe_load(fh))
+            config.database = db_path
+            config.releases = Releases.from_config(config)
+        log.debug("Configuration file loaded and parsed successfully.")
+    except Exception:
+        log.exception(
+            "Error while reading or parsing config file %s", config_path
+        )
+        raise
+
     env_map = (
         ('RHCOSBOT_JIRA_TOKEN', 'jira-token'),
         ('RHCOSBOT_JIRA_USER', 'jira-user'),
@@ -1066,6 +1110,13 @@ def main():
         v = os.environ.get(env)
         if v:
             setattr(config, config_key, v)
+            log.debug(
+                "Using value from environment for %s (env: %s)",
+                config_key,
+                env,
+            )
+        else:
+            log.debug("Using value from config file for %s", config_key)
 
     for required in ('jira', 'jira_user', 'jira_token', 'slack_token',
             'slack_app_token'):
@@ -1075,55 +1126,90 @@ def main():
             )
 
     # Connect to services
+    log.debug("Creating Slack WebClient...")
     try:
         client = WebClient(token=config.slack_token)
+        log.debug("Slack WebClient created successfully.")
     except Exception as e:
         raise Exception(f"Error creating slack client: {e}")
 
     # store our user ID
+    log.debug("Calling auth_test to determine Slack bot user id...")
     try:
         config.slack_id = client.auth_test()['user_id']
+        log.info("Slack auth_test succeeded; bot user id is %s", config.slack_id)
     except Exception as e:
         raise Exception(f"Error finding user id: {e}")
 
     # need to look up custom fields before constructing a Jira object
+    log.debug(
+        "Connecting to Jira at %s ...",
+        getattr(config, 'jira', '<missing jira URL>'),
+    )
     try:
         api = Jira.connect(config)
+        log.debug("Jira.connect() returned successfully.")
     except Exception as e:
         raise Exception(f"Error connecting to Jira: {e}")
 
+    log.debug("Verifying Jira authentication with api.myself()...")
     try:
         me = api.myself()
     except JIRAError as e:
+        log.error("Jira authentication failed: %s", e)
         raise Exception('Did not authenticate')
+    except Exception:
+        log.exception("Unexpected error calling api.myself()")
+        raise
+    else:
+        # Jira Cloud no longer guarantees a 'name' field; prefer displayName
+        jira_user = (
+            me.get('displayName')
+            or me.get('name')
+            or me.get('accountId')
+            or '<unknown>'
+        )
+        log.info("Jira authentication succeeded as %s", jira_user)
 
-    # Jira Cloud no longer guarantees a 'name' field; prefer displayName
-    jira_user = (
-        me.get('displayName')
-        or me.get('name')
-        or me.get('accountId')
-        or '<unknown>'
-    )
-    config.fields = {f['name']: f['id'] for f in api.fields()}
+    log.debug("Fetching Jira field definitions...")
+    try:
+        config.fields = {f['name']: f['id'] for f in api.fields()}
+        log.debug("Loaded %d Jira fields.", len(config.fields))
+    except Exception:
+        log.exception("Error fetching Jira fields")
+        raise
 
+    log.debug("Creating Jira wrapper object...")
     try:
         jira = Jira(config)
+        log.debug("Jira wrapper object created successfully.")
     except Exception as e:
         raise Exception(f"Error creating Jira object: {e}")
 
+    log.debug("Initializing database at %s ...", config.database)
     try:
         db = Database(config)
+        log.debug("Database initialized successfully.")
     except Exception as e:
-        raise Exception(f"Error creating databse object: {e}")
+        raise Exception(f"Error creating database object: {e}")
 
     # Start socket-mode listener in the background
+    log.debug("Creating Slack SocketModeClient...")
     socket_client = SocketModeClient(app_token=config.slack_app_token,
             web_client=WebClient(token=config.slack_token))
+    log.debug(
+        "SocketModeClient created; adding request listener and connecting..."
+    )
     socket_client.socket_mode_request_listeners.append(
             lambda socket_client, req: process_event(config, socket_client, req))
-    socket_client.connect()
+    try:
+        socket_client.connect()
+        log.info("SocketModeClient connected successfully.")
+    except Exception:
+        log.exception("Error connecting SocketModeClient")
+        raise
 
-    print("Application started successfully")
+    log.info("Application started successfully")
 
     # Run periodic tasks
     maint_period = config.jira_maintenance_interval // config.jira_poll_interval
