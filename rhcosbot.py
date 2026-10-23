@@ -3,7 +3,7 @@
 # Apache 2.0 license
 
 import argparse
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import itertools
@@ -1092,6 +1092,17 @@ def main():
         with open(config_path) as fh:
             config = DottedDict(yaml.safe_load(fh))
             config.database = db_path
+            # Plain attribute assignment is safe here only because
+            # dotted-dict < 2 (pinned in requirements.txt) does not
+            # recursively re-wrap values assigned via __setattr__/
+            # __setitem__. __setitem__ does sanitize the *key* being
+            # assigned (e.g. "jira-user" -> "jira_user", relied on by the
+            # env_map loop below) but, unlike dotted-dict >= 2, it leaves
+            # the *nested* keys inside an assigned value untouched. That's
+            # what keeps this Releases object intact instead of being
+            # silently converted into a plain DottedDict with sanitized
+            # (and therefore broken) by_target_version lookups. If the pin
+            # is ever lifted, this needs re-checking.
             config.releases = Releases.from_config(config)
         log.debug("Configuration file loaded and parsed successfully.")
     except Exception:
@@ -1173,11 +1184,45 @@ def main():
 
     log.debug("Fetching Jira field definitions...")
     try:
-        config.fields = {f['name']: f['id'] for f in api.fields()}
-        log.debug("Loaded %d Jira fields.", len(config.fields))
-    except Exception:
-        log.exception("Error fetching Jira fields")
-        raise
+        # Plain attribute assignment is safe here only because dotted-dict
+        # < 2 is pinned in requirements.txt (see the config.releases
+        # assignment above for why __setitem__ sanitizing the top-level
+        # key but not nested keys is what we're relying on). On
+        # dotted-dict >= 2 this dict's keys would be silently mangled
+        # (e.g. "Target Version" -> "Target_Version"), breaking every
+        # exact-name lookup below.
+        all_fields = list(api.fields())
+    except Exception as e:
+        raise Exception(f"Error fetching Jira fields: {e}")
+
+    field_names = [f['name'] for f in all_fields]
+    duplicates = sorted(
+        name for name, count in Counter(field_names).items() if count > 1
+    )
+    if duplicates:
+        log.warning(
+            "Jira has duplicate field display names: %s. The last "
+            "match for each will win and may bind to the wrong field.",
+            ", ".join(duplicates),
+        )
+    config.fields = {f['name']: f['id'] for f in all_fields}
+    log.debug("Loaded %d Jira fields.", len(config.fields))
+    # Fail fast at startup if a field we depend on by exact display
+    # name is missing or ambiguous, rather than surfacing a KeyError
+    # mid-request later.
+    for required_field in ('Target Version', 'Severity'):
+        if required_field not in config.fields:
+            raise Exception(
+                f'Required Jira field "{required_field}" not found. '
+                'It may have been renamed or is not visible to this '
+                'account.'
+            )
+        if required_field in duplicates:
+            raise Exception(
+                f'Jira field "{required_field}" is ambiguous: multiple '
+                'fields share this display name. Resolve the '
+                'duplicate before continuing.'
+            )
 
     log.debug("Creating Jira wrapper object...")
     try:
