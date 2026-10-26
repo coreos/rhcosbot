@@ -3,21 +3,25 @@
 # Apache 2.0 license
 
 import argparse
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dotted_dict import DottedDict
 from functools import cached_property, reduce, wraps
 import itertools
 from jira import JIRA, JIRAError
 from jira.resources import Issue as JIRAIssue
+import logging
 import os
 from slack_sdk import WebClient
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 import sqlite3
+import sys
 import time
 import threading
 import traceback
 import yaml
+
+log = logging.getLogger(__name__)
 
 ISSUE_LINK = 'https://github.com/coreos/rhcosbot/issues'
 HELP = f'''
@@ -196,11 +200,15 @@ class Jira:
     @staticmethod
     def connect(config):
         '''Low-level method to return a JIRA API object.'''
+        log.debug(
+            "Connecting to Jira Cloud at %s as %s",
+            getattr(config, "jira", None),
+            getattr(config, "jira_user", None),
+        )
         return JIRA(
-            config.jira, token_auth=config.jira_token,
-            default_batch_sizes={
-                JIRAIssue: 20,
-            }
+            config.jira,
+            basic_auth=(config.jira_user, config.jira_token),
+            default_batch_sizes={JIRAIssue: 20},
         )
 
     @cached_property
@@ -296,7 +304,7 @@ class Jira:
         # IDs are not sequential (!) so have the server sort by creation date
         query = ' AND '.join(f'({t})' for t in terms) + ' ORDER BY created ASC'
         if self._config.get('jira_log_searches', False):
-            print(query)
+            log.info("Jira search query: %s", query)
         issues = self.api.search_issues(
             query,
             fields=[self.field(f) for f in (fields + self.DEFAULT_FIELDS)],
@@ -505,10 +513,13 @@ def report_errors(f):
                 client = WebClient(token=config.slack_token)
                 channel = client.conversations_open(users=[config.error_notification])['channel']['id']
                 client.chat_postMessage(channel=channel, text=message)
-                # but always also print to the logs
-                print(message)
+                # but always also log to stdout/stderr
+                log.error("%s", message)
             except Exception:
-                traceback.print_exc()
+                log.exception(
+                    "Error sending Slack error notification; original message:\n%s",
+                    message,
+                )
         try:
             return f(config, *args, **kwargs)
         except Fail as e:
@@ -519,13 +530,13 @@ def report_errors(f):
         except JIRAError as e:
             if e.status_code == 401:
                 # Searches sometimes throw 401 errors.  Don't send message.
-                print(e)
+                log.warning("Jira 401 error: %s", e)
             else:
                 send(f'Caught exception:\n```\n{traceback.format_exc()}```')
         except (socket.timeout, urllib.error.URLError) as e:
             # Exception type leaked from the slack_sdk API.  Assume transient
             # network problem; don't send message.
-            print(e)
+            log.warning("Transient network error talking to Slack/Jira: %s", e)
         except Exception:
             send(f'Caught exception:\n```\n{traceback.format_exc()}```')
     return wrapper
@@ -1052,13 +1063,57 @@ def main():
             default='~/.rhcosbot-db', help='database file')
     args = parser.parse_args()
 
+    # Configure logging
+    log_level_name = os.environ.get('RHCOSBOT_LOG_LEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_name, None)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s',
+        stream=sys.stdout,
+    )
+    if not isinstance(log_level, int):
+        log.warning(
+            "Unrecognized RHCOSBOT_LOG_LEVEL %r; falling back to INFO.",
+            log_level_name,
+        )
+        log_level = logging.INFO
+    log.setLevel(log_level)  # only our logger follows RHCOSBOT_LOG_LEVEL
+
+    config_path = os.path.expanduser(args.config)
+    db_path = os.path.expanduser(args.database)
+    log.debug(
+        "rhcosbot starting with config file %s and database %s",
+        config_path,
+        db_path,
+    )
+
     # Read config
-    with open(os.path.expanduser(args.config)) as fh:
-        config = DottedDict(yaml.safe_load(fh))
-        config.database = os.path.expanduser(args.database)
-        config.releases = Releases.from_config(config)
+    try:
+        with open(config_path) as fh:
+            config = DottedDict(yaml.safe_load(fh))
+            config.database = db_path
+            # Plain attribute assignment is safe here only because
+            # dotted-dict < 2 (pinned in requirements.txt) does not
+            # recursively re-wrap values assigned via __setattr__/
+            # __setitem__. __setitem__ does sanitize the *key* being
+            # assigned (e.g. "jira-user" -> "jira_user", relied on by the
+            # env_map loop below) but, unlike dotted-dict >= 2, it leaves
+            # the *nested* keys inside an assigned value untouched. That's
+            # what keeps this Releases object intact instead of being
+            # silently converted into a plain DottedDict with sanitized
+            # (and therefore broken) by_target_version lookups. If the pin
+            # is ever lifted, this needs re-checking.
+            config.releases = Releases.from_config(config)
+        log.debug("Configuration file loaded and parsed successfully.")
+    except Exception:
+        log.exception(
+            "Error while reading or parsing config file %s", config_path
+        )
+        raise
+
     env_map = (
         ('RHCOSBOT_JIRA_TOKEN', 'jira-token'),
+        ('RHCOSBOT_JIRA_USER', 'jira-user'),
         ('RHCOSBOT_SLACK_APP_TOKEN', 'slack-app-token'),
         ('RHCOSBOT_SLACK_TOKEN', 'slack-token'),
     )
@@ -1066,49 +1121,140 @@ def main():
         v = os.environ.get(env)
         if v:
             setattr(config, config_key, v)
+            log.debug(
+                "Using value from environment for %s (env: %s)",
+                config_key,
+                env,
+            )
+        else:
+            log.debug("Using value from config file for %s", config_key)
+
+    for required in ('jira', 'jira_user', 'jira_token', 'slack_token',
+            'slack_app_token'):
+        if not config.get(required):
+            raise Exception(
+                f"Missing required config key: {required.replace('_', '-')}"
+            )
 
     # Connect to services
+    log.debug("Creating Slack WebClient...")
     try:
         client = WebClient(token=config.slack_token)
+        log.debug("Slack WebClient created successfully.")
     except Exception as e:
         raise Exception(f"Error creating slack client: {e}")
 
     # store our user ID
+    log.debug("Calling auth_test to determine Slack bot user id...")
     try:
         config.slack_id = client.auth_test()['user_id']
+        log.info("Slack auth_test succeeded; bot user id is %s", config.slack_id)
     except Exception as e:
         raise Exception(f"Error finding user id: {e}")
 
     # need to look up custom fields before constructing a Jira object
+    log.debug(
+        "Connecting to Jira at %s ...",
+        getattr(config, 'jira', '<missing jira URL>'),
+    )
     try:
         api = Jira.connect(config)
+        log.debug("Jira.connect() returned successfully.")
     except Exception as e:
         raise Exception(f"Error connecting to Jira: {e}")
 
+    log.debug("Verifying Jira authentication with api.myself()...")
     try:
-        api.myself()['name']
-    except JIRAError:
+        me = api.myself()
+    except JIRAError as e:
+        log.error("Jira authentication failed: %s", e)
         raise Exception('Did not authenticate')
-    config.fields = {f['name']: f['id'] for f in api.fields()}
+    except Exception:
+        log.exception("Unexpected error calling api.myself()")
+        raise
+    else:
+        # Jira Cloud no longer guarantees a 'name' field; prefer displayName
+        jira_user = (
+            me.get('displayName')
+            or me.get('name')
+            or me.get('accountId')
+            or '<unknown>'
+        )
+        log.info("Jira authentication succeeded as %s", jira_user)
 
+    log.debug("Fetching Jira field definitions...")
+    try:
+        # Plain attribute assignment is safe here only because dotted-dict
+        # < 2 is pinned in requirements.txt (see the config.releases
+        # assignment above for why __setitem__ sanitizing the top-level
+        # key but not nested keys is what we're relying on). On
+        # dotted-dict >= 2 this dict's keys would be silently mangled
+        # (e.g. "Target Version" -> "Target_Version"), breaking every
+        # exact-name lookup below.
+        all_fields = list(api.fields())
+    except Exception as e:
+        raise Exception(f"Error fetching Jira fields: {e}")
+
+    field_names = [f['name'] for f in all_fields]
+    duplicates = sorted(
+        name for name, count in Counter(field_names).items() if count > 1
+    )
+    if duplicates:
+        log.warning(
+            "Jira has duplicate field display names: %s. The last "
+            "match for each will win and may bind to the wrong field.",
+            ", ".join(duplicates),
+        )
+    config.fields = {f['name']: f['id'] for f in all_fields}
+    log.debug("Loaded %d Jira fields.", len(config.fields))
+    # Fail fast at startup if a field we depend on by exact display
+    # name is missing or ambiguous, rather than surfacing a KeyError
+    # mid-request later.
+    for required_field in ('Target Version', 'Severity'):
+        if required_field not in config.fields:
+            raise Exception(
+                f'Required Jira field "{required_field}" not found. '
+                'It may have been renamed or is not visible to this '
+                'account.'
+            )
+        if required_field in duplicates:
+            raise Exception(
+                f'Jira field "{required_field}" is ambiguous: multiple '
+                'fields share this display name. Resolve the '
+                'duplicate before continuing.'
+            )
+
+    log.debug("Creating Jira wrapper object...")
     try:
         jira = Jira(config)
+        log.debug("Jira wrapper object created successfully.")
     except Exception as e:
         raise Exception(f"Error creating Jira object: {e}")
 
+    log.debug("Initializing database at %s ...", config.database)
     try:
         db = Database(config)
+        log.debug("Database initialized successfully.")
     except Exception as e:
-        raise Exception(f"Error creating databse object: {e}")
+        raise Exception(f"Error creating database object: {e}")
 
     # Start socket-mode listener in the background
+    log.debug("Creating Slack SocketModeClient...")
     socket_client = SocketModeClient(app_token=config.slack_app_token,
             web_client=WebClient(token=config.slack_token))
+    log.debug(
+        "SocketModeClient created; adding request listener and connecting..."
+    )
     socket_client.socket_mode_request_listeners.append(
             lambda socket_client, req: process_event(config, socket_client, req))
-    socket_client.connect()
+    try:
+        socket_client.connect()
+        log.info("SocketModeClient connected successfully.")
+    except Exception:
+        log.exception("Error connecting SocketModeClient")
+        raise
 
-    print("Application started successfully")
+    log.info("Application started successfully")
 
     # Run periodic tasks
     maint_period = config.jira_maintenance_interval // config.jira_poll_interval

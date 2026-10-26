@@ -23,6 +23,27 @@ Alternatively, a [container image](https://quay.io/repository/coreos/rhcosbot) i
 
 You'll also need to set up a Slack app in your workspace and get an API token for it, and to get a Jira API key.
 
+## Logging
+
+`rhcosbot` uses Python's standard `logging` module and logs to stdout. By default
+the log level is `INFO`. You can adjust verbosity via the `RHCOSBOT_LOG_LEVEL`
+environment variable when running the script or container.
+
+Examples:
+
+```sh
+# Local run with debug logging
+RHCOSBOT_LOG_LEVEL=DEBUG env/bin/python rhcosbot.py
+
+# Container run with debug logging
+podman run --rm \
+  -e RHCOSBOT_LOG_LEVEL=DEBUG \
+  -v ~/.rhcosbot:/root/.rhcosbot:Z \
+  quay.io/coreos/rhcosbot:latest
+```
+
+Valid values include `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
+
 ## Slack scopes
 
 - `channels:read` - view public channels in a workspace

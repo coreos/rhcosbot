@@ -1,4 +1,4 @@
-dotted-dict
-jira
-PyYAML
-slack_sdk
+dotted-dict >= 1.1, < 2
+jira ~= 3.10
+PyYAML >= 6, < 7
+slack_sdk ~= 3.41
